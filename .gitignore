@@ -1,1 +1,11 @@
-.pc/
+*.swp
+*~
+*.sig
+*.tar.*
+*.announce
+*.rej
+*.trs
+*.gcda
+*.gcno
+tags
+*.gnuplot

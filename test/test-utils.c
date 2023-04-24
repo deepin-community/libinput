@@ -41,6 +41,57 @@
 
 #include "check-double-macros.h"
 
+START_TEST(array_for_each)
+{
+	int ai[6];
+	char ac[10];
+	struct as {
+		int a;
+		char b;
+		int *ptr;
+	} as[32];
+
+	for (size_t i = 0; i < 6; i++)
+		ai[i] = 20 + i;
+	for (size_t i = 0; i < 10; i++)
+		ac[i] = 100 + i;
+	for (size_t i = 0; i < 32; i++) {
+		as[i].a = 10 + i;
+		as[i].b = 20 + i;
+		as[i].ptr = (int*)0xab + i;
+	}
+
+	int iexpected = 20;
+	ARRAY_FOR_EACH(ai, entry) {
+		ck_assert_int_eq(*entry, iexpected);
+		++iexpected;
+	}
+	ck_assert_int_eq(iexpected, 26);
+
+	int cexpected = 100;
+	ARRAY_FOR_EACH(ac, entry) {
+		ck_assert_int_eq(*entry, cexpected);
+		++cexpected;
+	}
+	ck_assert_int_eq(cexpected, 110);
+
+	struct as sexpected = {
+		.a = 10,
+		.b = 20,
+		.ptr = (int*)0xab,
+	};
+	ARRAY_FOR_EACH(as, entry) {
+		ck_assert_int_eq(entry->a, sexpected.a);
+		ck_assert_int_eq(entry->b, sexpected.b);
+		ck_assert_ptr_eq(entry->ptr, sexpected.ptr);
+		++sexpected.a;
+		++sexpected.b;
+		++sexpected.ptr;
+	}
+	ck_assert_int_eq(sexpected.a, 42);
+}
+END_TEST
+
 START_TEST(bitfield_helpers)
 {
 	/* This value has a bit set on all of the word boundaries we want to
@@ -351,7 +402,8 @@ START_TEST(reliability_prop_parser)
 		enum switch_reliability reliability;
 	} tests[] = {
 		{ "reliable", true, RELIABILITY_RELIABLE },
-		{ "unreliable", false, 0 },
+		{ "unreliable", true, RELIABILITY_UNRELIABLE },
+		{ "write_open", true, RELIABILITY_WRITE_OPEN },
 		{ "", false, 0 },
 		{ "0", false, 0 },
 		{ "1", false, 0 },
@@ -373,7 +425,7 @@ START_TEST(reliability_prop_parser)
 
 	success = parse_switch_reliability_property(NULL, &r);
 	ck_assert(success == true);
-	ck_assert_int_eq(r, RELIABILITY_UNKNOWN);
+	ck_assert_int_eq(r, RELIABILITY_RELIABLE);
 
 	success = parse_switch_reliability_property("foo", NULL);
 	ck_assert(success == false);
@@ -678,7 +730,6 @@ START_TEST(evdev_abs_parser)
 		{ .which = 0, .prop = ":asb::::" },
 		{ .which = 0, .prop = "foo" },
 	};
-	struct test *t;
 
 	ARRAY_FOR_EACH(tests, t) {
 		struct input_absinfo abs;
@@ -1019,39 +1070,48 @@ START_TEST(strsplit_test)
 		const char *string;
 		const char *delim;
 		const char *results[10];
+		const size_t nresults;
 	} tests[] = {
-		{ "one two three", " ", { "one", "two", "three", NULL } },
-		{ "one", " ", { "one", NULL } },
-		{ "one two ", " ", { "one", "two", NULL } },
-		{ "one  two", " ", { "one", "two", NULL } },
-		{ " one two", " ", { "one", "two", NULL } },
-		{ "one", "\t \r", { "one", NULL } },
-		{ "one two three", " t", { "one", "wo", "hree", NULL } },
-		{ " one two three", "te", { " on", " ", "wo ", "hr", NULL } },
-		{ "one", "ne", { "o", NULL } },
-		{ "onene", "ne", { "o", NULL } },
-		{ NULL, NULL, { NULL }}
+		{ "one two three", " ", { "one", "two", "three", NULL }, 3 },
+		{ "one two\tthree", " \t", { "one", "two", "three", NULL }, 3 },
+		{ "one", " ", { "one", NULL }, 1 },
+		{ "one two ", " ", { "one", "two", NULL }, 2 },
+		{ "one  two", " ", { "one", "two", NULL }, 2 },
+		{ " one two", " ", { "one", "two", NULL }, 2 },
+		{ "one", "\t \r", { "one", NULL }, 1 },
+		{ "one two three", " t", { "one", "wo", "hree", NULL }, 3 },
+		{ " one two three", "te", { " on", " ", "wo ", "hr", NULL }, 4 },
+		{ "one", "ne", { "o", NULL }, 1 },
+		{ "onene", "ne", { "o", NULL }, 1 },
+		{ "+1-2++3--4++-+5-+-", "+-", { "1", "2", "3", "4", "5", NULL }, 5 },
+		/* special cases */
+		{ "", " ", { NULL }, 0 },
+		{ " ", " ", { NULL }, 0 },
+		{ "     ", " ", { NULL }, 0 },
+		{ "oneoneone", "one", { NULL} , 0 },
+		{ NULL, NULL, { NULL }, 0}
 	};
 	struct strsplit_test *t = tests;
 
 	while (t->string) {
-		char **strv;
-		int idx = 0;
-		strv = strv_from_string(t->string, t->delim);
-		while (t->results[idx]) {
+		size_t nelem;
+		char **strv = strv_from_string(t->string, t->delim, &nelem);
+
+		for (size_t idx = 0; idx < t->nresults; idx++)
 			ck_assert_str_eq(t->results[idx], strv[idx]);
-			idx++;
-		}
-		ck_assert_ptr_eq(strv[idx], NULL);
+
+		ck_assert_uint_eq(nelem, t->nresults);
+
+		/* When there are no elements validate return value is Null,
+		   otherwise validate result array is Null terminated. */
+		if(t->nresults == 0)
+			ck_assert_ptr_eq(strv, NULL);
+		else
+			ck_assert_ptr_eq(strv[t->nresults], NULL);
+
 		strv_free(strv);
 		t++;
 	}
-
-	/* Special cases */
-	ck_assert_ptr_eq(strv_from_string("", " "), NULL);
-	ck_assert_ptr_eq(strv_from_string(" ", " "), NULL);
-	ck_assert_ptr_eq(strv_from_string("     ", " "), NULL);
-	ck_assert_ptr_eq(strv_from_string("oneoneone", "one"), NULL);
 }
 END_TEST
 
@@ -1071,7 +1131,6 @@ START_TEST(strargv_test)
 		{ 1, {NULL, NULL}, 0 },
 		{ 3, {"hello", NULL, "World"}, 0 },
 	};
-	struct argv_test *t;
 
 	ARRAY_FOR_EACH(tests, t) {
 		char **strv = strv_from_argv(t->argc, t->argv);
@@ -1267,6 +1326,31 @@ START_TEST(strstartswith_test)
 }
 END_TEST
 
+START_TEST(strsanitize_test)
+{
+	struct strsanitize_test {
+		const char *string;
+		const char *expected;
+	} tests[] = {
+		{ "foobar", "foobar" },
+		{ "", "" },
+		{ "%", "%%" },
+		{ "%%%%", "%%%%%%%%" },
+		{ "x %s", "x %%s" },
+		{ "x %", "x %%" },
+		{ "%sx", "%%sx" },
+		{ "%s%s", "%%s%%s" },
+		{ NULL, NULL },
+	};
+
+	for (struct strsanitize_test *t = tests; t->string; t++) {
+		char *sanitized = str_sanitize(t->string);
+		ck_assert_str_eq(sanitized, t->expected);
+		free(sanitized);
+	}
+}
+END_TEST
+
 START_TEST(list_test_insert)
 {
 	struct list_test {
@@ -1414,7 +1498,6 @@ START_TEST(basename_test)
 		{ "/bar", "bar" },
 		{ "", NULL },
 	};
-	struct test *t;
 
 	ARRAY_FOR_EACH(tests, t) {
 		const char *result = safe_basename(t->path);
@@ -1442,7 +1525,6 @@ START_TEST(trunkname_test)
 		{ "/bar", "bar" },
 		{ "", "" },
 	};
-	struct test *t;
 
 	ARRAY_FOR_EACH(tests, t) {
 		char *result = trunkname(t->path);
@@ -1460,6 +1542,8 @@ litest_utils_suite(void)
 
 	s = suite_create("litest:utils");
 	tc = tcase_create("utils");
+
+	tcase_add_test(tc, array_for_each);
 
 	tcase_add_test(tc, bitfield_helpers);
 	tcase_add_test(tc, matrix_helpers);
@@ -1489,6 +1573,7 @@ litest_utils_suite(void)
 	tcase_add_test(tc, strstrip_test);
 	tcase_add_test(tc, strendswith_test);
 	tcase_add_test(tc, strstartswith_test);
+	tcase_add_test(tc, strsanitize_test);
 	tcase_add_test(tc, time_conversion);
 	tcase_add_test(tc, human_time);
 
