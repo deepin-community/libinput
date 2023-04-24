@@ -107,6 +107,7 @@ tools_init_options(struct tools_options *options)
 	options->left_handed = -1;
 	options->middlebutton = -1;
 	options->dwt = -1;
+	options->dwtp = -1;
 	options->click_method = -1;
 	options->scroll_method = -1;
 	options->scroll_button = -1;
@@ -174,6 +175,12 @@ tools_parse_option(int option,
 		break;
 	case OPT_DWT_DISABLE:
 		options->dwt = LIBINPUT_CONFIG_DWT_DISABLED;
+		break;
+	case OPT_DWTP_ENABLE:
+		options->dwtp = LIBINPUT_CONFIG_DWTP_ENABLED;
+		break;
+	case OPT_DWTP_DISABLE:
+		options->dwtp = LIBINPUT_CONFIG_DWTP_DISABLED;
 		break;
 	case OPT_CLICK_METHOD:
 		if (!optarg)
@@ -437,6 +444,9 @@ tools_device_apply_config(struct libinput_device *device,
 	if (options->dwt != -1)
 		libinput_device_config_dwt_set_enabled(device, options->dwt);
 
+	if (options->dwtp != -1)
+		libinput_device_config_dwtp_set_enabled(device, options->dwtp);
+
 	if (options->click_method != (enum libinput_config_click_method)-1)
 		libinput_device_config_click_set_method(device, options->click_method);
 
@@ -693,6 +703,7 @@ tools_list_device_quirks(struct quirks_context *ctx,
 			uint32_t v;
 			char *s;
 			double d;
+			bool b;
 
 			name = quirk_get_name(q);
 
@@ -733,7 +744,8 @@ tools_list_device_quirks(struct quirks_context *ctx,
 				break;
 			case QUIRK_ATTR_USE_VELOCITY_AVERAGING:
 			case QUIRK_ATTR_TABLET_SMOOTHING:
-				snprintf(buf, sizeof(buf), "%s=1", name);
+				quirks_get_bool(quirks, q, &b);
+				snprintf(buf, sizeof(buf), "%s=%d", name, b);
 				callback(userdata, buf);
 				break;
 			case QUIRK_ATTR_EVENT_CODE_DISABLE:
