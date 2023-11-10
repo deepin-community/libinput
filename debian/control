@@ -2,7 +2,9 @@ Source: libinput
 Section: libs
 Priority: optional
 Maintainer: Debian X Strike Force <debian-x@lists.debian.org>
-Uploaders: Emilio Pozuelo Monfort <pochu@debian.org>, Héctor Orón Martínez <zumbi@debian.org>
+Uploaders: Emilio Pozuelo Monfort <pochu@debian.org>,
+           Héctor Orón Martínez <zumbi@debian.org>,
+           Marius Gripsgard <marius@ubports.com>
 Build-Depends:
  debhelper-compat (= 13),
  meson,
@@ -13,7 +15,7 @@ Build-Depends:
  libudev-dev,
  libevdev-dev (>= 1.10.0),
  libwacom-dev (>= 0.20),
-Standards-Version: 4.6.1
+Standards-Version: 4.6.2
 Vcs-Git: https://salsa.debian.org/xorg-team/lib/libinput.git
 Vcs-Browser: https://salsa.debian.org/xorg-team/lib/libinput
 Homepage: https://www.freedesktop.org/wiki/Software/libinput/
