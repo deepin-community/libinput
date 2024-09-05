@@ -1,3 +1,26 @@
+libinput (1.26.0-1) unstable; urgency=medium
+
+  * New upstream release.
+  * watch: Updated.
+  * symbols: Updated.
+  * rules, install: Install udev files under /usr. (Closes: #1064396)
+  * control: Migrate to pkgconf.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 11 Jun 2024 13:49:02 +0300
+
+libinput (1.25.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 05 Feb 2024 14:20:23 +0200
+
+libinput (1.23.0-2.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * tools: Remove references to LIBINPUT_QUIRKS_SRCDIR. (Closes: #995809)
+
+ -- Vagrant Cascadian <vagrant@reproducible-builds.org>  Wed, 06 Dec 2023 15:10:33 -0800
+
 libinput (1.23.0-2) unstable; urgency=medium
 
   * debian/control:

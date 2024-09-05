@@ -968,9 +968,17 @@ fallback_interface_process(struct evdev_dispatch *evdev_dispatch,
 			   uint64_t time)
 {
 	struct fallback_dispatch *dispatch = fallback_dispatch(evdev_dispatch);
+	static bool warned = false;
 
-	if (dispatch->arbitration.in_arbitration)
+	if (dispatch->arbitration.in_arbitration) {
+		if (!warned) {
+			evdev_log_debug(device, "dropping events due to touch arbitration\n");
+			warned = true;
+		}
 		return;
+	}
+
+	warned = false;
 
 	switch (event->type) {
 	case EV_REL:
@@ -1057,10 +1065,15 @@ release_pressed_keys(struct fallback_dispatch *dispatch,
 				LIBINPUT_KEY_STATE_RELEASED);
 			break;
 		case KEY_TYPE_BUTTON:
+			/* Note: the left-handed configuration is nonzero for
+			 * the mapped button (not the physical button), in
+			 * get_key_down_count(). We must not map this to left-handed
+			 * again, see #881.
+			 */
 			evdev_pointer_notify_button(
 				device,
 				time,
-				evdev_to_left_handed(device, code),
+				code,
 				LIBINPUT_BUTTON_STATE_RELEASED);
 			break;
 		}
@@ -1183,6 +1196,7 @@ fallback_interface_toggle_touch(struct evdev_dispatch *evdev_dispatch,
 {
 	struct fallback_dispatch *dispatch = fallback_dispatch(evdev_dispatch);
 	struct device_coord_rect rect = {0};
+	const char *state = NULL;
 
 	if (which == dispatch->arbitration.state)
 		return;
@@ -1198,19 +1212,24 @@ fallback_interface_toggle_touch(struct evdev_dispatch *evdev_dispatch,
 		 * event is caught as palm touch. */
 		libinput_timer_set(&dispatch->arbitration.arbitration_timer,
 				   time + ms2us(90));
+		state = "not-active";
 		break;
 	case ARBITRATION_IGNORE_RECT:
 		assert(phys_rect);
 		rect = evdev_phys_rect_to_units(device, phys_rect);
 		cancel_touches(dispatch, device, &rect, time);
 		dispatch->arbitration.rect = rect;
+		state = "ignore-rect";
 		break;
 	case ARBITRATION_IGNORE_ALL:
 		libinput_timer_cancel(&dispatch->arbitration.arbitration_timer);
 		fallback_return_to_neutral_state(dispatch, device);
 		dispatch->arbitration.in_arbitration = true;
+		state = "ignore-all";
 		break;
 	}
+
+	evdev_log_debug(device, "Touch arbitration state now %s\n", state);
 
 	dispatch->arbitration.state = which;
 }
@@ -1403,7 +1422,7 @@ fallback_interface_device_removed(struct evdev_device *device,
 	}
 }
 
-struct evdev_dispatch_interface fallback_interface = {
+static struct evdev_dispatch_interface fallback_interface = {
 	.process = fallback_interface_process,
 	.suspend = fallback_interface_suspend,
 	.remove = fallback_interface_remove,
@@ -1497,7 +1516,6 @@ fallback_init_rotation(struct fallback_dispatch *dispatch,
 	dispatch->rotation.config.set_angle = fallback_rotation_config_set_angle;
 	dispatch->rotation.config.get_angle = fallback_rotation_config_get_angle;
 	dispatch->rotation.config.get_default_angle = fallback_rotation_config_get_default_angle;
-	dispatch->rotation.is_enabled = false;
 	matrix_init_identity(&dispatch->rotation.matrix);
 	device->base.config.rotation = &dispatch->rotation.config;
 }
@@ -1617,6 +1635,8 @@ fallback_arbitration_timeout(uint64_t now, void *data)
 
 	if (dispatch->arbitration.in_arbitration)
 		dispatch->arbitration.in_arbitration = false;
+
+	evdev_log_debug(dispatch->device, "touch arbitration timeout\n");
 }
 
 static void

@@ -34,6 +34,7 @@
 
 #include "quirks.h"
 #include "evdev-mt-touchpad.h"
+#include "util-input-event.h"
 
 #define DEFAULT_TRACKPOINT_ACTIVITY_TIMEOUT ms2us(300)
 #define DEFAULT_TRACKPOINT_EVENT_TIMEOUT ms2us(40)
@@ -1845,6 +1846,7 @@ tp_post_process_state(struct tp_dispatch *tp, uint64_t time)
 		tp_thumb_reset(tp);
 
 	tp_tap_post_process_state(tp);
+	tp_button_post_process_state(tp);
 }
 
 static void
@@ -3137,12 +3139,24 @@ tp_scroll_config_scroll_method_get_default_method(struct libinput_device *device
 	return tp_scroll_get_default_method(tp);
 }
 
+static int
+tp_scroll_config_natural_get_default(struct libinput_device *device)
+{
+	struct evdev_device *dev = evdev_device(device);
+
+	return (evdev_device_has_model_quirk(dev, QUIRK_MODEL_APPLE_TOUCHPAD) ||
+		evdev_device_has_model_quirk(dev, QUIRK_MODEL_APPLE_TOUCHPAD_ONEBUTTON));
+}
+
 static void
 tp_init_scroll(struct tp_dispatch *tp, struct evdev_device *device)
 {
 	tp_edge_scroll_init(tp, device);
 
 	evdev_init_natural_scroll(device);
+	/* Override natural scroll config for Apple touchpads */
+	device->scroll.config_natural.get_default_enabled = tp_scroll_config_natural_get_default;
+	device->scroll.natural_scrolling_enabled = tp_scroll_config_natural_get_default(&device->base);
 
 	tp->scroll.config_method.get_methods = tp_scroll_config_scroll_method_get_methods;
 	tp->scroll.config_method.set_method = tp_scroll_config_scroll_method_set_method;
@@ -3338,6 +3352,10 @@ tp_init_palmdetect_edge(struct tp_dispatch *tp,
 	    !tp_is_tpkb_combo_below(device))
 		return;
 
+	/* Edge palm detection hurts more than it helps on Apple touchpads. */
+	if (evdev_device_has_model_quirk(device, QUIRK_MODEL_APPLE_TOUCHPAD))
+		return;
+
 	evdev_device_get_size(device, &width, &height);
 
 	/* Enable edge palm detection on touchpads >= 70 mm. Anything
@@ -3392,11 +3410,13 @@ tp_init_palmdetect_pressure(struct tp_dispatch *tp,
 	}
 
 	tp->palm.pressure_threshold = tp_read_palm_pressure_prop(tp, device);
-	tp->palm.use_pressure = true;
+	if (tp->palm.pressure_threshold != 0) {
+		tp->palm.use_pressure = true;
 
-	evdev_log_debug(device,
-			"palm: pressure threshold is %d\n",
-			tp->palm.pressure_threshold);
+		evdev_log_debug(device,
+				"palm: pressure threshold is %d\n",
+				tp->palm.pressure_threshold);
+	}
 }
 
 static inline void
@@ -3413,11 +3433,7 @@ tp_init_palmdetect_size(struct tp_dispatch *tp,
 		return;
 
 	if (quirks_get_uint32(q, QUIRK_ATTR_PALM_SIZE_THRESHOLD, &threshold)) {
-		if (threshold == 0) {
-			evdev_log_bug_client(device,
-					     "palm: ignoring invalid threshold %d\n",
-					     threshold);
-		} else {
+		if (threshold != 0) {
 			tp->palm.use_size = true;
 			tp->palm.size_threshold = threshold;
 		}
@@ -3613,7 +3629,7 @@ tp_init_pressure(struct tp_dispatch *tp,
 			goto out;
 		}
 	} else {
-		unsigned int range = abs->maximum - abs->minimum;
+		double range = absinfo_range(abs);
 
 		/* Approximately the synaptics defaults */
 		hi = abs->minimum + 0.12 * range;

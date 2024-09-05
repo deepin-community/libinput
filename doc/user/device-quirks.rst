@@ -112,11 +112,11 @@ output.
 .. _device-quirks-list:
 
 ------------------------------------------------------------------------------
-List of supported device quirks
+List of currently available device quirks
 ------------------------------------------------------------------------------
 
 This list is a guide for developers to ease the process of submitting
-patches upstream. This section shows device quirks supported in
+patches upstream. This section shows device quirks currently available in
 |git_version|.
 
 .. warning:: Quirks are internal API and may change at any time for any reason.
@@ -161,11 +161,15 @@ AttrTouchSizeRange=N:M, AttrPalmSizeThreshold=O
     Specifies the touch size required to trigger a press (N) and to trigger
     a release (M). O > N > M. See :ref:`touchpad_touch_size_hwdb` for more
     details.
+    An AttrPalmSizeThreshold of zero unsets any threshold that has been
+    inherited from another quirk.
 AttrPressureRange=N:M, AttrPalmPressureThreshold=O, AttrThumbPressureThreshold=P
     Specifies the touch pressure required to trigger a press (N) and to
     trigger a release (M), when a palm touch is triggered (O) and when a
     thumb touch is triggered (P). O > P > N > M. See
     :ref:`touchpad_pressure_hwdb` for more details.
+    An AttrPalmPressureThreshold of zero unsets any threshold that has been
+    inherited from another quirk.
 AttrLidSwitchReliability=reliable|unreliable|write_open
     Indicates the reliability of the lid switch. This is a string enum.
     Very few devices need this, if in doubt do not set. See :ref:`switches_lid`

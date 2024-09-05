@@ -116,14 +116,17 @@ struct litest_device_interface {
 
 	bool (*tablet_proximity_in)(struct litest_device *d,
 				    unsigned int tool_type,
-				    double x, double y,
+				    double *x, double *y,
 				    struct axis_replacement *axes);
 	bool (*tablet_proximity_out)(struct litest_device *d, unsigned int tool_type);
 	bool (*tablet_tip_down)(struct litest_device *d,
-				int x, int y,
+				double *x, double *y,
 				struct axis_replacement *axes);
 	bool (*tablet_tip_up)(struct litest_device *d,
-			      int x, int y,
+			      double *x, double *y,
+			      struct axis_replacement *axes);
+	bool (*tablet_motion)(struct litest_device *d,
+			      double *x, double *y,
 			      struct axis_replacement *axes);
 
 	/**
@@ -133,6 +136,14 @@ struct litest_device_interface {
 	struct input_event *pad_ring_start_events;
 	struct input_event *pad_ring_change_events;
 	struct input_event *pad_ring_end_events;
+
+	/**
+	 * Pad events, LITEST_AUTO_ASSIGN is allowed on event values
+	 * for ABS_WHEEL
+	 */
+	struct input_event *pad_dial_start_events;
+	struct input_event *pad_dial_change_events;
+	struct input_event *pad_dial_end_events;
 
 	/**
 	 * Pad events, LITEST_AUTO_ASSIGN is allowed on event values
