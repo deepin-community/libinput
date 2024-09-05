@@ -69,7 +69,7 @@ will be:
 
      $> git clone https://gitlab.freedesktop.org/libinput/libinput
      $> cd libinput
-     $> meson --prefix=/usr builddir/
+     $> meson setup --prefix=/usr builddir/
      $> ninja -C builddir/
      $> sudo ninja -C builddir/ install
 
@@ -78,6 +78,15 @@ You can omit the last step if you only want to test locally.
 ------------------------------------------------------------------------------
 Working on the code
 ------------------------------------------------------------------------------
+
+If you are planning to send patches, it's a good idea to set up
+`pre-commit <https://pre-commit.com/>`_ with these commands::
+
+     $> pre-commit install
+     $> pre-commit install --hook-type pre-push
+
+This will check a few things before you commit and/or push to your repos to
+reduce the turnaround time for some common mistakes.
 
 libinput has a roughly three-parts architecture:
 
@@ -151,12 +160,17 @@ Any patches should be sent via a Merge Request (see the `GitLab docs
 in the `libinput GitLab instance hosted by freedesktop.org
 <https://gitlab.freedesktop.org/libinput/libinput>`_.
 
+.. note:: freedesktop.org's GitLab instance has restrictions to prevent Spam
+          and you cannot fork libinput until you have successfully
+          `applied for fork permissions <https://gitlab.freedesktop.org/freedesktop/freedesktop/-/wikis/home>`_.
+
 Below are the steps required to submit a merge request. They do not
 replace `learning git <https://git-scm.com/doc>`__ but they should be
 sufficient to make some of the more confusing steps obvious.
 
 - `Register an account <https://gitlab.freedesktop.org/users/sign_in>`_ in
-  the freedesktop.org GitLab instance.
+  the freedesktop.org GitLab instance and
+  `apply for fork permissions <https://gitlab.freedesktop.org/freedesktop/freedesktop/-/wikis/home>`_.
 - `Fork libinput <https://gitlab.freedesktop.org/libinput/libinput/-/forks/new>`_
   into your username's namespace. Select public visibility.
 - Get libinput's main repository. git will call this repository ``origin``. ::
@@ -266,31 +280,23 @@ same file(s) as the patch being sent.
 Commit Messages
 ------------------------------------------------------------------------------
 
-Commit messages **must** contain a **Signed-off-by** line with your name
-and email address. An example is: ::
-
-    A description of this commit, and it's great work.
-
-    Signed-off-by: Claire Someone <name@domain>
-
-If you're not the patch's original author, you should
-also gather S-o-b's by them (and/or whomever gave the patch to you.) The
-significance of this is that it certifies that you created the patch, that
-it was created under an appropriate open source license, or provided to you
-under those terms. This lets us indicate a chain of responsibility for the
-copyright status of the code. An example is: ::
-
-    A description of this commit, and it's great work.
-
-    Signed-off-by: Claire Someone <name@domain>
-    Signed-off-by: Ferris Crab <name@domain>
-
 When you re-send patches, revised or not, it would be very good to document the
 changes compared to the previous revision in the commit message and/or the
 merge request. If you have already received Reviewed-by or Acked-by tags, you
 should evaluate whether they still apply and include them in the respective
 commit messages. Otherwise the tags may be lost, reviewers miss the credit they
 deserve, and the patches may cause redundant review effort.
+
+If your commit solves a GitLab issue, add a ``Closes:`` tag followed by the
+issue number at the end of your commit message. For example: ::
+
+  Closes: #974
+
+If your commit fixes an issue introduced by another commit, use a ``Fixes`` tag
+followed by the first 12 characters of the SHA-1 ID and the commit one line
+summary at the end of your commit message. For example: ::
+
+  Fixes: 123456789012 ("The commit that caused the issue")
 
 For further reading, please see
 `'on commit messages' <http://who-t.blogspot.de/2009/12/on-commit-messages.html>`_
@@ -352,26 +358,6 @@ Visit your merge request page and check the `pipeline mini graph
 step failed.
 
 Follow the appropriate section to fix the errors.
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Missing "Signed-off-by: author information"
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-As explained in :ref:`contributing_commit_messages`, every commit must contain a
-Signed-off-by line with your name and email address.
-
-When this line is not present, it can be added to your commit afterwards: ::
-
-  git commit --amend -s
-
-If the merge request contains more than one commit, it must be added to all of
-them: ::
-
-  git rebase --interactive --exec 'git commit --amend -s' main
-
-Once the problem is fixed, force-push your branch. See
-:ref:`contributing_submitting_code` for more details about how to push your code
-and interactive rebases.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Committed gitlab-ci.yml differs from generated gitlab-ci.yml. Please verify

@@ -205,6 +205,18 @@ tools_parse_option(int option,
 			return 1;
 		}
 		break;
+	case OPT_CLICKFINGER_MAP:
+		if (!optarg)
+			return 1;
+
+		if (streq(optarg, "lrm")) {
+			options->clickfinger_map = LIBINPUT_CONFIG_CLICKFINGER_MAP_LRM;
+		} else if (streq(optarg, "lmr")) {
+			options->clickfinger_map = LIBINPUT_CONFIG_CLICKFINGER_MAP_LMR;
+		} else {
+			return 1;
+		}
+		break;
 	case OPT_SCROLL_METHOD:
 		if (!optarg)
 			return 1;
@@ -315,6 +327,14 @@ tools_parse_option(int option,
 			return 1;
 		}
 		break;
+	case OPT_ROTATION_ANGLE:
+		if (!optarg)
+			return 1;
+
+		if (!safe_atou(optarg, &options->angle)) {
+			fprintf(stderr, "Invalid --set-rotation-angle value\n");
+			return 1;
+		}
 	}
 	return 0;
 }
@@ -491,6 +511,10 @@ tools_device_apply_config(struct libinput_device *device,
 	if (options->click_method != (enum libinput_config_click_method)-1)
 		libinput_device_config_click_set_method(device, options->click_method);
 
+	if (options->clickfinger_map != (enum libinput_config_clickfinger_button_map)-1)
+		libinput_device_config_click_set_clickfinger_button_map(device,
+									options->clickfinger_map);
+
 	if (options->scroll_method != (enum libinput_config_scroll_method)-1)
 		libinput_device_config_scroll_set_method(device,
 							 options->scroll_method);
@@ -520,6 +544,9 @@ tools_device_apply_config(struct libinput_device *device,
 		libinput_device_config_accel_apply(device, config);
 		libinput_config_accel_destroy(config);
 	}
+
+	if (options->angle != 0)
+		libinput_device_config_rotation_set_angle(device, options->angle % 360);
 }
 
 static char*

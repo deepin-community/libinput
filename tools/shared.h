@@ -51,6 +51,7 @@ enum configuration_options {
 	OPT_DWTP_ENABLE,
 	OPT_DWTP_DISABLE,
 	OPT_CLICK_METHOD,
+	OPT_CLICKFINGER_MAP,
 	OPT_SCROLL_METHOD,
 	OPT_SCROLL_BUTTON,
 	OPT_SCROLL_BUTTON_LOCK_ENABLE,
@@ -62,6 +63,7 @@ enum configuration_options {
 	OPT_CUSTOM_POINTS,
 	OPT_CUSTOM_STEP,
 	OPT_CUSTOM_TYPE,
+	OPT_ROTATION_ANGLE,
 };
 
 #define CONFIGURATION_OPTIONS \
@@ -85,6 +87,7 @@ enum configuration_options {
 	{ "enable-scroll-button-lock", no_argument,       0, OPT_SCROLL_BUTTON_LOCK_ENABLE }, \
 	{ "disable-scroll-button-lock",no_argument,       0, OPT_SCROLL_BUTTON_LOCK_DISABLE }, \
 	{ "set-click-method",          required_argument, 0, OPT_CLICK_METHOD }, \
+	{ "set-clickfinger-map",       required_argument, 0, OPT_CLICKFINGER_MAP }, \
 	{ "set-scroll-method",         required_argument, 0, OPT_SCROLL_METHOD }, \
 	{ "set-scroll-button",         required_argument, 0, OPT_SCROLL_BUTTON }, \
 	{ "set-profile",               required_argument, 0, OPT_PROFILE }, \
@@ -93,7 +96,8 @@ enum configuration_options {
 	{ "apply-to",                  required_argument, 0, OPT_APPLY_TO },\
 	{ "set-custom-points",         required_argument, 0, OPT_CUSTOM_POINTS },\
 	{ "set-custom-step",           required_argument, 0, OPT_CUSTOM_STEP },\
-	{ "set-custom-type",           required_argument, 0, OPT_CUSTOM_TYPE }
+	{ "set-custom-type",           required_argument, 0, OPT_CUSTOM_TYPE },\
+	{ "set-rotation-angle",        required_argument, 0, OPT_ROTATION_ANGLE }
 
 enum tools_backend {
 	BACKEND_NONE,
@@ -111,6 +115,7 @@ struct tools_options {
 	int left_handed;
 	int middlebutton;
 	enum libinput_config_click_method click_method;
+	enum libinput_config_clickfinger_button_map clickfinger_map;
 	enum libinput_config_scroll_method scroll_method;
 	enum libinput_config_tap_button_map tap_map;
 	int scroll_button;
@@ -124,6 +129,7 @@ struct tools_options {
 	double custom_step;
 	size_t custom_npoints;
 	double *custom_points;
+	unsigned int angle;
 };
 
 void tools_init_options(struct tools_options *options);
