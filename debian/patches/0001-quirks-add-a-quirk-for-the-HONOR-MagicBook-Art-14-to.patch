@@ -1,0 +1,32 @@
+From 134ab3d3d90ab502a51d3972a0634299182e1ccf Mon Sep 17 00:00:00 2001
+From: Wentao Guan <guanwentao@uniontech.com>
+Date: Mon, 23 Sep 2024 08:51:47 +0000
+Subject: [PATCH] quirks: add a quirk for the HONOR MagicBook Art 14 touchpad
+
+The touchpad need ModelPressurePad=1 to enable moving cursor,
+and need AttrEventCode=-BTN_RIGHT to use right key by touchpad
+two-fingers press..
+
+Link:https://gitlab.freedesktop.org/libinput/libinput/-/issues/1040
+---
+ quirks/50-system-honor.quirks | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+ create mode 100644 quirks/50-system-honor.quirks
+
+diff --git a/quirks/50-system-honor.quirks b/quirks/50-system-honor.quirks
+new file mode 100644
+index 0000000..4f5e802
+--- /dev/null
++++ b/quirks/50-system-honor.quirks
+@@ -0,0 +1,8 @@
++# Clickpad that announces BTN_RIGHT
++# requires ModelPressurePad=1
++[HONOR MagicBook Art 14]
++MatchName=*TOPS0102*
++MatchDMIModalias=dmi:*svnHONOR:*pnMRA-XXX*
++MatchUdevType=touchpad
++AttrEventCode=-BTN_RIGHT
++ModelPressurePad=1
+-- 
+2.46.1
+

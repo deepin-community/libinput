@@ -1,3 +1,10 @@
+libinput (1.26.0-1deepin1) unstable; urgency=medium
+
+  * Backport a patch to fix unreliable touchpad on HONOR MagicBook Art 14.
+  * Ref: https://gitlab.freedesktop.org/libinput/libinput/-/merge_requests/1053
+
+ -- Mingcong Bai <baimingcong@uniontech.com>  Mon, 23 Sep 2024 16:59:13 +0800
+
 libinput (1.26.0-1) unstable; urgency=medium
 
   * New upstream release.
