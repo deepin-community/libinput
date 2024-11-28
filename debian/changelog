@@ -1,3 +1,9 @@
+libinput (1.26.0-1deepin3) unstable; urgency=medium
+
+  * Add patch fix the "Force pads" on ThinkBook 14+ G6 IMH
+
+ -- xiangzelong <xiangzelong@deepin.org>  Thu, 28 Nov 2024 15:20:59 +0800
+
 libinput (1.26.0-1deepin2) UNRELEASED; urgency=medium
 
   * Backport a patch to fix the "Force Pads" on ThinkBook 14+ G6/G7+.
