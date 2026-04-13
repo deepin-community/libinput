@@ -1,3 +1,9 @@
+libinput (1.26.0-1deepin5) unstable; urgency=medium
+
+  * Revert patch for Lenovo ThinkBook G8+ IPH touchpad.
+
+ -- lichenggang <lichenggang@deepin.org>  Mon, 13 Apr 2026 09:00:00 +0800
+
 libinput (1.26.0-1deepin4) unstable; urgency=medium
 
   * Backport a patch to fix pressure pad on Lenovo ThinkBook G8+ IPH.
