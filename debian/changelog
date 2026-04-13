@@ -1,10 +1,3 @@
-libinput (1.26.0-1deepin4) unstable; urgency=medium
-
-  * Backport a patch to fix pressure pad on Lenovo ThinkBook G8+ IPH.
-  * Ref: https://gitlab.freedesktop.org/libinput/libinput/-/merge_requests/1442
-
- -- lichenggang <lichenggang@deepin.org>  Mon, 16 Mar 2026 09:22:00 +0800
-
 libinput (1.26.0-1deepin3) unstable; urgency=medium
 
   * Add patch fix the "Force pads" on ThinkBook 14+ G6 IMH
