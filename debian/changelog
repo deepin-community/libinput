@@ -1,3 +1,11 @@
+libinput (1.26.0-1deepin6) unstable; urgency=medium
+
+  * Fix CVE-2026-50292: libinput-device-group unescaped phys output
+    can inject udev properties leading to arbitrary root code execution.
+    (Closes: CVE-2026-50292)
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 09 Jun 2026 09:30:00 +0800
+
 libinput (1.26.0-1deepin5) unstable; urgency=medium
 
   * Revert patch for Lenovo ThinkBook G8+ IPH touchpad.
