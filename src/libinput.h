@@ -150,8 +150,8 @@ struct libinput_event_touch;
  *
  * Tablet tool event representing an axis update, button press, or tool
  * update. Valid event types for this event are @ref
- * LIBINPUT_EVENT_TABLET_TOOL_AXIS, @ref
- * LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY and @ref
+ * LIBINPUT_EVENT_TABLET_TOOL_AXIS, @ref LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY,
+ * @ref LIBINPUT_EVENT_TABLET_TOOL_TIP, and @ref
  * LIBINPUT_EVENT_TABLET_TOOL_BUTTON.
  *
  * @since 1.2
@@ -164,9 +164,9 @@ struct libinput_event_tablet_tool;
  *
  * Tablet pad event representing a button press, or ring/strip update on
  * the tablet pad itself. Valid event types for this event are @ref
- * LIBINPUT_EVENT_TABLET_PAD_BUTTON, @ref LIBINPUT_EVENT_TABLET_PAD_DIAL,
- * @ref LIBINPUT_EVENT_TABLET_PAD_RING and
- * @ref LIBINPUT_EVENT_TABLET_PAD_STRIP.
+ * LIBINPUT_EVENT_TABLET_PAD_BUTTON, @ref LIBINPUT_EVENT_TABLET_PAD_RING,
+ * @ref LIBINPUT_EVENT_TABLET_PAD_STRIP, @ref LIBINPUT_EVENT_TABLET_PAD_KEY
+ * and @ref LIBINPUT_EVENT_TABLET_PAD_DIAL.
  *
  * @since 1.3
  */
@@ -2401,6 +2401,10 @@ libinput_event_tablet_tool_wheel_has_changed(
  * libinput_event_tablet_tool_get_x_transformed() for transforming the axis
  * value into a different coordinate space.
  *
+ * If an area is defined for this device, the coordinate is in mm from
+ * the top left corner of the area. See
+ * libinput_device_config_area_set_rectangle() for details.
+ *
  * @note On some devices, returned value may be negative or larger than the
  * width of the device. See the libinput documentation for more details.
  *
@@ -2419,6 +2423,10 @@ libinput_event_tablet_tool_get_x(struct libinput_event_tablet_tool *event);
  * corner of the tablet in its current logical orientation. Use
  * libinput_event_tablet_tool_get_y_transformed() for transforming the axis
  * value into a different coordinate space.
+ *
+ * If an area is defined for this device, the coordinate is in mm from
+ * the top left corner of the area. See
+ * libinput_device_config_area_set_rectangle() for details.
  *
  * @note On some devices, returned value may be negative or larger than the
  * width of the device. See the libinput documentation for more details.
@@ -4615,6 +4623,10 @@ libinput_device_group_get_user_data(struct libinput_device_group *group);
  *    - libinput_device_config_dwt_set_enabled()
  * - Touchscreens:
  *    - libinput_device_config_calibration_set_matrix()
+ * - Tablets:
+ *    - libinput_device_config_calibration_set_matrix()
+ *    - libinput_tablet_tool_config_pressure_range_set()
+ *    - libinput_device_config_left_handed_set()
  * - Pointer devices (mice, trackballs, touchpads):
  *    - libinput_device_config_accel_set_speed()
  *    - libinput_device_config_accel_set_profile()
@@ -4872,8 +4884,8 @@ enum libinput_config_drag_state {
  * @param enable @ref LIBINPUT_CONFIG_DRAG_ENABLED to enable, @ref
  * LIBINPUT_CONFIG_DRAG_DISABLED to disable tap-and-drag
  *
- * @see libinput_device_config_tap_drag_get_enabled
- * @see libinput_device_config_tap_drag_get_default_enabled
+ * @see libinput_device_config_tap_get_drag_enabled
+ * @see libinput_device_config_tap_get_default_drag_enabled
  *
  * @since 1.2
  */
@@ -4891,8 +4903,8 @@ libinput_device_config_tap_set_drag_enabled(struct libinput_device *device,
  * @retval LIBINPUT_CONFIG_DRAG_DISABLED if tap-and-drag is
  * disabled
  *
- * @see libinput_device_config_tap_drag_set_enabled
- * @see libinput_device_config_tap_drag_get_default_enabled
+ * @see libinput_device_config_tap_set_drag_enabled
+ * @see libinput_device_config_tap_get_default_default_enabled
  *
  * @since 1.2
  */
@@ -4911,8 +4923,8 @@ libinput_device_config_tap_get_drag_enabled(struct libinput_device *device);
  * @retval LIBINPUT_CONFIG_DRAG_DISABLED if tap-and-drag is
  * disabled by default
  *
- * @see libinput_device_config_tap_drag_set_enabled
- * @see libinput_device_config_tap_drag_get_enabled
+ * @see libinput_device_config_tap_set_drag_enabled
+ * @see libinput_device_config_tap_get_drag_enabled
  *
  * @since 1.2
  */
@@ -4925,24 +4937,33 @@ libinput_device_config_tap_get_default_drag_enabled(struct libinput_device *devi
 enum libinput_config_drag_lock_state {
 	/** Drag lock is to be disabled, or is currently disabled */
 	LIBINPUT_CONFIG_DRAG_LOCK_DISABLED,
-	/** Drag lock is to be enabled, or is currently disabled */
-	LIBINPUT_CONFIG_DRAG_LOCK_ENABLED,
+	/** Drag lock is to be enabled in timeout mode,
+	 *  or is currently enabled in timeout mode */
+	LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_TIMEOUT,
+	/** legacy spelling for LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_TIMEOUT */
+	LIBINPUT_CONFIG_DRAG_LOCK_ENABLED = LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_TIMEOUT,
+	/** Drag lock is to be enabled in sticky mode,
+	 *  or is currently enabled in sticky mode */
+	LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY,
 };
 
 /**
  * @ingroup config
  *
  * Enable or disable drag-lock during tapping on this device. When enabled,
- * a finger may be lifted and put back on the touchpad within a timeout and
- * the drag process continues. When disabled, lifting the finger during a
- * tap-and-drag will immediately stop the drag. See the libinput
- * documentation for more details.
+ * a finger may be lifted and put back on the touchpad and the drag process
+ * continues. A timeout for lifting the finger is optional. When disabled,
+ * lifting the finger during a tap-and-drag will immediately stop the drag.
+ * See the libinput documentation for more details.
  *
- * Enabling drag lock on a device that has tapping disabled is permitted,
- * but has no effect until tapping is enabled.
+ * Enabling drag lock on a device that has tapping or tap-and-drag disabled is
+ * permitted, but has no effect until tapping and tap-and-drag are enabled.
  *
  * @param device The device to configure
- * @param enable @ref LIBINPUT_CONFIG_DRAG_LOCK_ENABLED to enable drag lock
+ * @param enable @ref LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY to enable drag
+ * lock in sticky mode,
+ * @ref LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_TIMEOUT to enable drag lock in timeout
+ * mode,
  * or @ref LIBINPUT_CONFIG_DRAG_LOCK_DISABLED to disable drag lock
  *
  * @return A config status code. Disabling drag lock on a device that does not
@@ -4962,11 +4983,14 @@ libinput_device_config_tap_set_drag_lock_enabled(struct libinput_device *device,
  * device does not support tapping, this function always returns
  * @ref LIBINPUT_CONFIG_DRAG_LOCK_DISABLED.
  *
- * Drag lock may be enabled even when tapping is disabled.
+ * Drag lock may be enabled even when tapping or tap-and-drag is disabled.
  *
  * @param device The device to configure
  *
- * @retval LIBINPUT_CONFIG_DRAG_LOCK_ENABLED If drag lock is currently enabled
+ * @retval LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY If drag lock is currently
+ * enabled in sticky mode
+ * @retval LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_TIMEOUT If drag lock is currently
+ * enabled in timeout mode
  * @retval LIBINPUT_CONFIG_DRAG_LOCK_DISABLED If drag lock is currently disabled
  *
  * @see libinput_device_config_tap_set_drag_lock_enabled
@@ -4982,13 +5006,15 @@ libinput_device_config_tap_get_drag_lock_enabled(struct libinput_device *device)
  * If the device does not support tapping, this function always returns
  * @ref LIBINPUT_CONFIG_DRAG_LOCK_DISABLED.
  *
- * Drag lock may be enabled by default even when tapping is disabled by
- * default.
+ * Drag lock may be enabled by default even when tapping or tap-and-drag is
+ * disabled by default.
  *
  * @param device The device to configure
  *
- * @retval LIBINPUT_CONFIG_DRAG_LOCK_ENABLED If drag lock is enabled by
- * default
+ * @retval LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY If drag lock is enabled in
+ * sticky mode by default
+ * @retval LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_TIMEOUT If drag lock is enabled in
+ * timeout mode by default
  * @retval LIBINPUT_CONFIG_DRAG_LOCK_DISABLED If drag lock is disabled by
  * default
  *
@@ -4997,6 +5023,107 @@ libinput_device_config_tap_get_drag_lock_enabled(struct libinput_device *device)
  */
 enum libinput_config_drag_lock_state
 libinput_device_config_tap_get_default_drag_lock_enabled(struct libinput_device *device);
+
+/**
+ * @ingroup config
+ *
+ * A config status to distinguish or set 3-finger dragging on a device.
+ *
+ * @since 1.27
+ */
+enum libinput_config_3fg_drag_state {
+	/**
+	 * Drag is to be disabled, or is
+	 * currently disabled.
+	 */
+	LIBINPUT_CONFIG_3FG_DRAG_DISABLED,
+	/**
+	 * Drag is to be enabled for 3 fingers, or is
+	 * currently enabled
+	 */
+	LIBINPUT_CONFIG_3FG_DRAG_ENABLED_3FG,
+	/**
+	 * Drag is to be enabled for 4 fingers, or is
+	 * currently enabled
+	 */
+	LIBINPUT_CONFIG_3FG_DRAG_ENABLED_4FG,
+};
+
+/**
+ * @ingroup config
+ *
+ * Returns the maximum number of fingers available for 3-finger dragging.
+ *
+ * @param device The device to check
+ *
+ * @see libinput_device_config_3fg_drag_set_enabled
+ * @see libinput_device_config_3fg_drag_get_enabled
+ * @see libinput_device_config_3fg_drag_get_default_enabled
+ *
+ * @since 1.27
+ */
+int
+libinput_device_config_3fg_drag_get_finger_count(struct libinput_device *device);
+
+/**
+ * @ingroup config
+ *
+ * Enable or disable 3-finger drag on this device. When enabled, three fingers
+ * down will result in a button down event, subsequent finger motion triggers
+ * a drag. The button is released shortly after all fingers are logically up.
+ * See the libinput documentation for more details.
+ *
+ * @param device The device to configure
+ * @param enable @ref LIBINPUT_CONFIG_DRAG_ENABLED to enable, @ref
+ * LIBINPUT_CONFIG_DRAG_DISABLED to disable 3-finger drag
+ *
+ * @see libinput_device_config_3fg_drag_is_available
+ * @see libinput_device_config_3fg_drag_get_enabled
+ * @see libinput_device_config_3fg_drag_get_default_enabled
+ *
+ * @since 1.27
+ */
+enum libinput_config_status
+libinput_device_config_3fg_drag_set_enabled(struct libinput_device *device,
+					    enum libinput_config_3fg_drag_state enable);
+
+/**
+ * @ingroup config
+ *
+ * Return whether 3-finger drag is enabled or disabled on this device.
+ *
+ * @param device The device to check
+ * @retval LIBINPUT_CONFIG_DRAG_ENABLED if 3-finger drag is enabled
+ * @retval LIBINPUT_CONFIG_DRAG_DISABLED if 3-finger drag is
+ * disabled
+ *
+ * @see libinput_device_config_3fg_drag_is_available
+ * @see libinput_device_config_3fg_drag_set_enabled
+ * @see libinput_device_config_3fg_drag_get_default_enabled
+ *
+ * @since 1.27
+ */
+enum libinput_config_3fg_drag_state
+libinput_device_config_3fg_drag_get_enabled(struct libinput_device *device);
+
+/**
+ * @ingroup config
+ *
+ * Return whether 3-finger drag is enabled or disabled by default on this device.
+ *
+ * @param device The device to check
+ * @retval LIBINPUT_CONFIG_DRAG_ENABLED if 3-finger drag is enabled
+ * @retval LIBINPUT_CONFIG_DRAG_DISABLED if 3-finger drag is
+ * disabled
+ *
+ * @see libinput_device_config_3fg_drag_is_available
+ * @see libinput_device_config_3fg_drag_set_enabled
+ * @see libinput_device_config_3fg_drag_get_enabled
+ *
+ * @since 1.27
+ */
+enum libinput_config_3fg_drag_state
+libinput_device_config_3fg_drag_get_default_enabled(struct libinput_device *device);
 
 /**
  * @ingroup config
@@ -5109,6 +5236,143 @@ libinput_device_config_calibration_get_matrix(struct libinput_device *device,
 int
 libinput_device_config_calibration_get_default_matrix(struct libinput_device *device,
 						      float matrix[6]);
+
+/**
+ * @ingroup config
+ *
+ * Describes a rectangle to configure a device's area, see
+ * libinput_device_config_area_set_rectangle().
+ *
+ * This struct describes a rectangle via the upper left points (x1, y1)
+ * and the lower right point (x2, y2).
+ *
+ * All arguments are normalized to the range [0.0, 1.0] to represent the
+ * corresponding proportion of the device's width and height, respectively.
+ * A rectangle covering the whole device thus comprises of the points
+ * (0.0, 0.0) and (1.0, 1.0).
+ *
+ * The conditions x1 < x2 and y1 < y2 must be true.
+ */
+struct libinput_config_area_rectangle {
+	double x1;
+	double y1;
+	double x2;
+	double y2;
+};
+
+/**
+ * @ingroup config
+ *
+ * Check if the device can change its logical input area via a rectangle.
+ *
+ * @param device The device to check
+ * @return Non-zero if the device can be calibrated, zero otherwise.
+ *
+ * @see libinput_device_config_area_set_rectangle
+ * @see libinput_device_config_area_get_rectangle
+ * @see libinput_device_config_area_get_default_rectangle
+ */
+int
+libinput_device_config_area_has_rectangle(struct libinput_device *device);
+
+/**
+ * @ingroup config
+ *
+ * Set the given rectangle as the logical input area of this device.
+ * Future interactions by a tablet tool on this devices are scaled
+ * to only consider events within this logical input area - as if the
+ * logical input area were the available physical area.
+ *
+ * The coordinates of the rectangle represent the proportion of the
+ * available maximum physical area, normalized to the range [0.0, 1.0].
+ * For example, a rectangle with the two points 0.25, 0.5, 0.75, 1.0
+ * adds a 25% dead zone to the left and right and a 50% dead zone on
+ * the top:
+ *
+ * @code
+ * +----------------------------------+
+ * |                                  |
+ * |                50%               |
+ * |                                  |
+ * |        +-----------------+       |
+ * |        |                 |       |
+ * |   25%  |                 |  25%  |
+ * |        |                 |       |
+ * +--------+-----------------+-------+
+ * @endcode
+ *
+ * The area applies in the tablet's current logical rotation, i.e. the above
+ * example is always at the bottom of the tablet.
+ *
+ * Once applied, the logical area's top-left coordinate (in the current logical
+ * rotation) becomes the new offset (0/0) and the return values of
+ * libinput_event_tablet_tool_get_x() and libinput_event_tablet_tool_get_y()
+ * are in relation to this new offset.
+ *
+ * Likewise, libinput_event_tablet_tool_get_x_transformed() and
+ * libinput_event_tablet_tool_get_y_transformed() represent the value scaled
+ * into the configured logical area.
+ *
+ * The return value of libinput_device_get_size() is not affected by the
+ * configured area.
+ *
+ * Changing the area may not take effect immediately, the device may wait until
+ * it is in a neutral state before applying any changes.
+ *
+ * @param device The device to check
+ * @param rect The intended rectangle
+ * @return A config status code. Setting the area on a device that does not
+ * support area rectangles always fails with @ref LIBINPUT_CONFIG_STATUS_UNSUPPORTED.
+ *
+ * @see libinput_device_config_area_has_rectangle
+ * @see libinput_device_config_area_get_rectangle
+ * @see libinput_device_config_area_get_default_rectangle
+ */
+enum libinput_config_status
+libinput_device_config_area_set_rectangle(struct libinput_device *device,
+					  const struct libinput_config_area_rectangle *rect);
+
+/**
+ * @ingroup config
+ *
+ * Return the current area rectangle for this device.
+ *
+ * The return value for a device that does not support area rectangles is a
+ * rectangle with the points 0/0  and 1/1.
+ *
+ * @note It is an application bug to call this function for devices where
+ * libinput_device_config_area_has_rectangle() returns 0.
+ *
+ * @param device The device to check
+ * @return The current area rectangle
+ *
+ * @see libinput_device_config_area_has_rectangle
+ * @see libinput_device_config_area_set_rectangle
+ * @see libinput_device_config_area_get_default_rectangle
+ */
+struct libinput_config_area_rectangle
+libinput_device_config_area_get_rectangle(struct libinput_device *device);
+
+/**
+ * @ingroup config
+ *
+ * Return the default area rectangle for this device.
+ *
+ * The return value for a device that does not support area rectangles is a
+ * rectangle with the points 0/0  and 1/1.
+ *
+ * @note It is an application bug to call this function for devices where
+ * libinput_device_config_area_has_rectangle() returns 0.
+ *
+ * @param device The device to check
+ * @return The default area rectangle
+ *
+ * @see libinput_device_config_area_has_rectangle
+ * @see libinput_device_config_area_set_rectangle
+ * @see libinput_device_config_area_get_rectangle
+ */
+struct libinput_config_area_rectangle
+libinput_device_config_area_get_default_rectangle(struct libinput_device *device);
 
 /**
  * @ingroup config
@@ -6581,7 +6845,7 @@ libinput_device_config_rotation_get_default_angle(struct libinput_device *device
  * @see libinput_tablet_tool_config_pressure_range_get_default_minimum
  * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
  *
- * @since 1.25
+ * @since 1.26
  */
 int
 libinput_tablet_tool_config_pressure_range_is_available(struct libinput_tablet_tool *tool);
@@ -6594,11 +6858,11 @@ libinput_tablet_tool_config_pressure_range_is_available(struct libinput_tablet_t
  * pressure of the given minimum value maps into a logical pressure of 0.0 (as
  * returned by libinput_event_tablet_tool_get_pressure()) and the hardware
  * pressure of the given maximum value is mapped into the logical pressure
- * of 1.0 (as returned by . libinput_event_tablet_tool_get_pressure())
+ * of 1.0 (as returned by libinput_event_tablet_tool_get_pressure())
  *
  * The minimum value must be less than the maximum value, libinput may
- * libinput may require the values to have a specific distance to each other,
- * i.e. that (maximium - minimum > N) for an implementation-defined value of N.
+ * require the values to have a specific distance to each other,
+ * i.e. that (maximum - minimum > N) for an implementation-defined value of N.
  *
  * @param tool The libinput tool
  * @param minimum The minimum pressure value in the range [0.0, 1.0)
@@ -6611,6 +6875,8 @@ libinput_tablet_tool_config_pressure_range_is_available(struct libinput_tablet_t
  * @see libinput_tablet_tool_config_pressure_range_get_maximum
  * @see libinput_tablet_tool_config_pressure_range_get_default_minimum
  * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
+ *
+ * @since 1.26
  */
 enum libinput_config_status
 libinput_tablet_tool_config_pressure_range_set(struct libinput_tablet_tool *tool,
@@ -6633,6 +6899,8 @@ libinput_tablet_tool_config_pressure_range_set(struct libinput_tablet_tool *tool
  * @see libinput_tablet_tool_config_pressure_range_get_maximum
  * @see libinput_tablet_tool_config_pressure_range_get_default_minimum
  * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
+ *
+ * @since 1.26
  */
 double
 libinput_tablet_tool_config_pressure_range_get_minimum(struct libinput_tablet_tool *tool);
@@ -6651,8 +6919,10 @@ libinput_tablet_tool_config_pressure_range_get_minimum(struct libinput_tablet_to
  *
  * @see libinput_tablet_tool_config_pressure_range_is_available
  * @see libinput_tablet_tool_config_pressure_range_get_minimum
+ * @see libinput_tablet_tool_config_pressure_range_get_default_minimum
  * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
- * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
+ *
+ * @since 1.26
  */
 double
 libinput_tablet_tool_config_pressure_range_get_maximum(struct libinput_tablet_tool *tool);
@@ -6673,6 +6943,8 @@ libinput_tablet_tool_config_pressure_range_get_maximum(struct libinput_tablet_to
  * @see libinput_tablet_tool_config_pressure_range_get_minimum
  * @see libinput_tablet_tool_config_pressure_range_get_maximum
  * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
+ *
+ * @since 1.26
  */
 double
 libinput_tablet_tool_config_pressure_range_get_default_minimum(struct libinput_tablet_tool *tool);
@@ -6690,9 +6962,11 @@ libinput_tablet_tool_config_pressure_range_get_default_minimum(struct libinput_t
  * @return The maximum pressure value for this tablet tool
  *
  * @see libinput_tablet_tool_config_pressure_range_is_available
- * @see libinput_tablet_tool_config_pressure_range_get_maximum
+ * @see libinput_tablet_tool_config_pressure_range_get_minimum
  * @see libinput_tablet_tool_config_pressure_range_get_maximum
  * @see libinput_tablet_tool_config_pressure_range_get_default_maximum
+ *
+ * @since 1.26
  */
 double
 libinput_tablet_tool_config_pressure_range_get_default_maximum(struct libinput_tablet_tool *tool);

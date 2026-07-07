@@ -309,7 +309,10 @@ static struct input_absinfo absinfo[] = {
 	{ 0x2c, 0, 255, 0, 0, 0 },
 	{ 0x2d, 0, 255, 0, 0, 0 },
 	{ 0x2e, 0, 255, 0, 0, 0 },
-	{ 0x2f, 0, 255, 0, 0, 0 },
+	/* Note: slot count artificially reduced for kernel
+	 * commit 206f533a0a7c ("Input: uinput - reject requests with unreasonable number of slots")
+	 */
+	{ 0x2f, 0, 64, 0, 0, 0 },
 	{ 0x30, 0, 255, 0, 0, 0 },
 	{ 0x31, 0, 255, 0, 0, 0 },
 	{ 0x32, 0, 255, 0, 0, 0 },
@@ -329,8 +332,7 @@ static struct input_absinfo absinfo[] = {
 	{ .value = -1 },
 };
 
-TEST_DEVICE("blackwidow",
-	.type = LITEST_KEYBOARD_BLACKWIDOW,
+TEST_DEVICE(LITEST_KEYBOARD_BLACKWIDOW,
 	.features = LITEST_KEYS | LITEST_WHEEL,
 	.interface = NULL,
 

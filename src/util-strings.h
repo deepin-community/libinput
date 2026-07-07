@@ -45,6 +45,12 @@
 
 #include "util-macros.h"
 
+#define yesno(b) ((b) ? "yes" : "no")
+#define truefalse(b) ((b) ? "true" : "false")
+#define YESNO(b) ((b) ? "YES" : "NO")
+#define TRUEFALSE(b) ((b) ? "TRUE" : "FALSE")
+#define onoff(b) ((b) ? "on" : "off")
+
 static inline bool
 streq(const char *str1, const char *str2)
 {
@@ -100,6 +106,15 @@ safe_strdup(const char *str)
 }
 
 /**
+ * NULL-safe version of strlen
+ */
+static inline size_t
+safe_strlen(const char *str)
+{
+	return str ? strlen(str) : 0;
+}
+
+/**
  * Simple wrapper for asprintf that ensures the passed in-pointer is set
  * to NULL upon error.
  * The standard asprintf() call does not guarantee the passed in pointer
@@ -138,6 +153,33 @@ xvasprintf(char **strp, const char *fmt, va_list args)
 		*strp = NULL;
 
 	return rc;
+}
+
+__attribute__ ((format (printf, 1, 2)))
+static inline char *
+strdup_printf(const char *fmt, ...)
+{
+	int rc = 0;
+	va_list args;
+	char *strp;
+
+	va_start(args, fmt);
+	rc = vasprintf(&strp, fmt, args);
+	va_end(args);
+	if (rc < 0)
+		abort();
+	return strp;
+}
+
+__attribute__ ((format (printf, 1, 0)))
+static inline char *
+strdup_vprintf(const char *fmt, va_list args)
+{
+	char *strp;
+	int rc = xvasprintf(&strp, fmt, args);
+	if (rc < 0)
+		abort();
+	return strp;
 }
 
 static inline bool
@@ -265,6 +307,10 @@ safe_atod(const char *str, double *val)
 char **strv_from_argv(int argc, char **argv);
 char **strv_from_string(const char *in, const char *separator, size_t *num_elements);
 char *strv_join(char **strv, const char *joiner);
+
+typedef int (*strv_foreach_callback_t)(const char *str, size_t index, void *data);
+int strv_for_each(const char **strv, strv_foreach_callback_t func, void *data);
+int strv_for_each_n(const char **strv, size_t max, strv_foreach_callback_t func, void *data);
 
 static inline void
 strv_free(char **strv) {
@@ -406,7 +452,7 @@ strstrip(const char *input, const char *what)
 
 	last = str;
 
-	for (char *c = str; *c != '\0'; c++) {
+	for (char *c = str; c && *c != '\0'; c++) {
 		if (!strchr(what, *c))
 			last = c + 1;
 	}

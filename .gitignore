@@ -3,6 +3,7 @@
 *.sig
 *.tar.*
 *.announce
+*.patch
 *.rej
 *.trs
 *.gcda

@@ -218,6 +218,15 @@ struct libinput_device_config_tap {
 	enum libinput_config_drag_lock_state (*get_default_draglock_enabled)(struct libinput_device *device);
 };
 
+struct libinput_device_config_3fg_drag {
+	int (*count)(struct libinput_device *device);
+	enum libinput_config_status (*set_enabled)(struct libinput_device *device,
+						   enum libinput_config_3fg_drag_state enable);
+	enum libinput_config_3fg_drag_state (*get_enabled)(struct libinput_device *device);
+	enum libinput_config_3fg_drag_state (*get_default)(struct libinput_device *device);
+
+};
+
 struct libinput_device_config_calibration {
 	int (*has_matrix)(struct libinput_device *device);
 	enum libinput_config_status (*set_matrix)(struct libinput_device *device,
@@ -226,6 +235,14 @@ struct libinput_device_config_calibration {
 			  float matrix[6]);
 	int (*get_default_matrix)(struct libinput_device *device,
 							  float matrix[6]);
+};
+
+struct libinput_device_config_area {
+	int (*has_rectangle)(struct libinput_device *device);
+	enum libinput_config_status (*set_rectangle)(struct libinput_device *device,
+						     const struct libinput_config_area_rectangle *rectangle);
+	struct libinput_config_area_rectangle (*get_rectangle)(struct libinput_device *device);
+	struct libinput_config_area_rectangle (*get_default_rectangle)(struct libinput_device *device);
 };
 
 struct libinput_device_config_send_events {
@@ -391,6 +408,7 @@ struct libinput_device_config_gesture {
 struct libinput_device_config {
 	struct libinput_device_config_tap *tap;
 	struct libinput_device_config_calibration *calibration;
+	struct libinput_device_config_area *area;
 	struct libinput_device_config_send_events *sendevents;
 	struct libinput_device_config_accel *accel;
 	struct libinput_device_config_natural_scroll *natural_scroll;
@@ -402,6 +420,7 @@ struct libinput_device_config {
 	struct libinput_device_config_dwtp *dwtp;
 	struct libinput_device_config_rotation *rotation;
 	struct libinput_device_config_gesture *gesture;
+	struct libinput_device_config_3fg_drag *drag_3fg;
 };
 
 struct libinput_device_group {
@@ -465,6 +484,21 @@ struct libinput_tablet_tool_config_pressure_range {
 	void (*get_default)(struct libinput_tablet_tool *tool, double *min, double *max);
 };
 
+struct libinput_tablet_tool_pressure_threshold {
+	unsigned int tablet_id;
+
+	/* The configured axis we actually work with */
+	struct input_absinfo abs_pressure;
+	struct threshold threshold; /* in device coordinates */
+	int offset; /* in device coordinates */
+	bool has_offset;
+
+	/* This gives us per-tablet heuristic state which is arguably
+	 * wrong but >99% of users have one tablet and it's easier to
+	 * implement it this way */
+	enum pressure_heuristic_state heuristic_state;
+};
+
 struct libinput_tablet_tool {
 	struct list link;
 	uint32_t serial;
@@ -476,17 +510,16 @@ struct libinput_tablet_tool {
 	void *user_data;
 
 	struct {
-		/* The configured axis we actually work with */
-		struct input_absinfo abs_pressure;
-		struct normalized_range range;
+                /* We're assuming that the *configured* pressure range is per
+                 * tool, not per tablet. The *adjusted* thresholds are then
+                 * per-tablet. */
+                struct normalized_range range;
 		struct normalized_range wanted_range;
 		bool has_configured_range;
 
-		struct threshold threshold; /* in device coordinates */
-		int offset; /* in device coordinates */
-		bool has_offset;
-
-		enum pressure_heuristic_state heuristic_state;
+		/* Hard-coded because I doubt we have users with more
+		 * than 4 tablets at the same time */
+		struct libinput_tablet_tool_pressure_threshold thresholds[4];
 	} pressure;
 
 	struct {
@@ -752,9 +785,9 @@ gesture_notify_pinch_end(struct libinput_device *device,
 			 bool cancelled);
 
 void
-gesture_notify_hold(struct libinput_device *device,
-		    uint64_t time,
-		    int finger_count);
+gesture_notify_hold_begin(struct libinput_device *device,
+			  uint64_t time,
+			  int finger_count);
 
 void
 gesture_notify_hold_end(struct libinput_device *device,
@@ -768,7 +801,9 @@ tablet_notify_axis(struct libinput_device *device,
 		   struct libinput_tablet_tool *tool,
 		   enum libinput_tablet_tool_tip_state tip_state,
 		   unsigned char *changed_axes,
-		   const struct tablet_axes *axes);
+		   const struct tablet_axes *axes,
+		   const struct input_absinfo *x,
+		   const struct input_absinfo *y);
 
 void
 tablet_notify_proximity(struct libinput_device *device,
@@ -776,7 +811,9 @@ tablet_notify_proximity(struct libinput_device *device,
 			struct libinput_tablet_tool *tool,
 			enum libinput_tablet_tool_proximity_state state,
 			unsigned char *changed_axes,
-			const struct tablet_axes *axes);
+			const struct tablet_axes *axes,
+			const struct input_absinfo *x,
+			const struct input_absinfo *y);
 
 void
 tablet_notify_tip(struct libinput_device *device,
@@ -784,7 +821,9 @@ tablet_notify_tip(struct libinput_device *device,
 		  struct libinput_tablet_tool *tool,
 		  enum libinput_tablet_tool_tip_state tip_state,
 		  unsigned char *changed_axes,
-		  const struct tablet_axes *axes);
+		  const struct tablet_axes *axes,
+		  const struct input_absinfo *x,
+		  const struct input_absinfo *y);
 
 void
 tablet_notify_button(struct libinput_device *device,
@@ -793,7 +832,9 @@ tablet_notify_button(struct libinput_device *device,
 		     enum libinput_tablet_tool_tip_state tip_state,
 		     const struct tablet_axes *axes,
 		     int32_t button,
-		     enum libinput_button_state state);
+		     enum libinput_button_state state,
+		     const struct input_absinfo *x,
+		     const struct input_absinfo *y);
 
 void
 tablet_pad_notify_button(struct libinput_device *device,
@@ -836,14 +877,15 @@ switch_notify_toggle(struct libinput_device *device,
 static inline uint64_t
 libinput_now(struct libinput *libinput)
 {
-	struct timespec ts = { 0, 0 };
+	uint64_t now;
+	int rc = now_in_us(&now);
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		log_error(libinput, "clock_gettime failed: %s\n", strerror(errno));
+	if (rc < 0) {
+		log_error(libinput, "clock_gettime failed: %s\n", strerror(-rc));
 		return 0;
 	}
 
-	return s2us(ts.tv_sec) + ns2us(ts.tv_nsec);
+	return now;
 }
 
 static inline struct device_float_coords

@@ -261,6 +261,13 @@ MatchVendor=0x1532
 MatchProduct=0x028C
 AttrKeyboardIntegration=internal
 
+[RazerBlade142023 Keyboard]
+MatchUdevType=keyboard
+MatchBus=usb
+MatchVendor=0x1532
+MatchProduct=0x029D
+AttrKeyboardIntegration=internal
+
 [RazerBlade152023 Keyboard]
 MatchUdevType=keyboard
 MatchBus=usb
@@ -280,4 +287,18 @@ MatchUdevType=keyboard
 MatchBus=usb
 MatchVendor=0x1532
 MatchProduct=0x02A0
+AttrKeyboardIntegration=internal
+
+[RazerBlade142024 Keyboard]
+MatchUdevType=keyboard
+MatchBus=usb
+MatchVendor=0x1532
+MatchProduct=0x02B6
+AttrKeyboardIntegration=internal
+
+[RazerBlade182024 Keyboard]
+MatchUdevType=keyboard
+MatchBus=usb
+MatchVendor=0x1532
+MatchProduct=0x02B8
 AttrKeyboardIntegration=internal

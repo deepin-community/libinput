@@ -88,10 +88,13 @@ totem_new_tool(struct totem_dispatch *totem)
 		.refcount = 1,
 	};
 
-	tool->pressure.offset = 0;
-	tool->pressure.has_offset = false;
-	tool->pressure.threshold.lower = 0;
-	tool->pressure.threshold.upper = 1;
+	ARRAY_FOR_EACH(tool->pressure.thresholds, t) {
+		t->tablet_id = 0;
+		t->offset = 0;
+		t->has_offset = false;
+		t->threshold.lower = 0;
+		t->threshold.upper = 1;
+	}
 
 	set_bit(tool->axis_caps, LIBINPUT_TABLET_TOOL_AXIS_X);
 	set_bit(tool->axis_caps, LIBINPUT_TABLET_TOOL_AXIS_Y);
@@ -401,14 +404,18 @@ totem_handle_slot_state(struct totem_dispatch *totem,
 					slot->tool,
 					LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN,
 					slot->changed_axes,
-					&axes);
+					&axes,
+					device->abs.absinfo_x,
+					device->abs.absinfo_y);
 		totem_slot_reset_changed_axes(totem, slot);
 		tablet_notify_tip(&device->base,
 				  time,
 				  slot->tool,
 				  tip_state,
 				  slot->changed_axes,
-				  &axes);
+				  &axes,
+				  device->abs.absinfo_x,
+				  device->abs.absinfo_y);
 		slot->state = SLOT_STATE_UPDATE;
 		break;
 	case SLOT_STATE_UPDATE:
@@ -419,7 +426,9 @@ totem_handle_slot_state(struct totem_dispatch *totem,
 					   slot->tool,
 					   tip_state,
 					   slot->changed_axes,
-					   &axes);
+					   &axes,
+					   device->abs.absinfo_x,
+					   device->abs.absinfo_y);
 		}
 		break;
 	case SLOT_STATE_END:
@@ -452,7 +461,9 @@ totem_handle_slot_state(struct totem_dispatch *totem,
 				     tip_state,
 				     &axes,
 				     BTN_0,
-				     btn_state);
+				     btn_state,
+				     device->abs.absinfo_x,
+				     device->abs.absinfo_y);
 
 		totem->button_state_previous = totem->button_state_now;
 	}
@@ -468,14 +479,19 @@ totem_handle_slot_state(struct totem_dispatch *totem,
 				  slot->tool,
 				  tip_state,
 				  slot->changed_axes,
-				  &axes);
+				  &axes,
+				  device->abs.absinfo_x,
+				  device->abs.absinfo_y);
 		totem_slot_reset_changed_axes(totem, slot);
 		tablet_notify_proximity(&device->base,
 					time,
 					slot->tool,
 					LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_OUT,
 					slot->changed_axes,
-					&axes);
+					&axes,
+				        device->abs.absinfo_x,
+				        device->abs.absinfo_y);
+
 		slot->state = SLOT_STATE_NONE;
 		break;
 	case SLOT_STATE_NONE:
@@ -577,7 +593,9 @@ totem_interface_suspend(struct evdev_dispatch *dispatch,
 					     tip_state,
 					     &axes,
 					     BTN_0,
-					     LIBINPUT_BUTTON_STATE_RELEASED);
+					     LIBINPUT_BUTTON_STATE_RELEASED,
+					     device->abs.absinfo_x,
+					     device->abs.absinfo_y);
 
 			totem->button_state_now = false;
 			totem->button_state_previous = false;
@@ -589,14 +607,18 @@ totem_interface_suspend(struct evdev_dispatch *dispatch,
 					  slot->tool,
 					  LIBINPUT_TABLET_TOOL_TIP_UP,
 					  slot->changed_axes,
-					  &axes);
+					  &axes,
+					  device->abs.absinfo_x,
+					  device->abs.absinfo_y);
 		}
 		tablet_notify_proximity(&device->base,
 					now,
 					slot->tool,
 					LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_OUT,
 					slot->changed_axes,
-					&axes);
+					&axes,
+				        device->abs.absinfo_x,
+				        device->abs.absinfo_y);
 	}
 	totem_set_touch_device_enabled(totem, true, now);
 }
@@ -683,14 +705,18 @@ totem_interface_initial_proximity(struct evdev_device *device,
 					slot->tool,
 					LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN,
 					slot->changed_axes,
-					&axes);
+					&axes,
+				        device->abs.absinfo_x,
+				        device->abs.absinfo_y);
 		totem_slot_reset_changed_axes(totem, slot);
 		tablet_notify_tip(&device->base,
 				  now,
 				  slot->tool,
 				  LIBINPUT_TABLET_TOOL_TIP_DOWN,
 				  slot->changed_axes,
-				  &axes);
+				  &axes,
+				  device->abs.absinfo_x,
+				  device->abs.absinfo_y);
 		slot->state = SLOT_STATE_UPDATE;
 		enable_touch = false;
 	}
