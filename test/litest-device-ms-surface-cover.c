@@ -63,9 +63,12 @@ static struct input_absinfo absinfo[] = {
 	{ 44, -127, 127, 0, 0, 0 },
 	{ 45, -127, 127, 0, 0, 0 },
 	{ 46, -127, 127, 0, 0, 0 },
-	{ 47, -127, 127, 0, 0, 0 },
 	/* ABS_MT range overlap starts here */
-	{ 48, -127, 127, 0, 0, 0 }, /* ABS_MT_SLOT */
+	/* Note: slot count artificially reduced for kernel
+	 * commit 206f533a0a7c ("Input: uinput - reject requests with unreasonable number of slots")
+	 */
+	{ 47, 0, 64, 0, 0, 0 }, /* ABS_MT_SLOT */
+	{ 48, -127, 127, 0, 0, 0 },
 	{ 49, -127, 127, 0, 0, 0 },
 	{ 50, -127, 127, 0, 0, 0 },
 	{ 51, -127, 127, 0, 0, 0 },
@@ -367,8 +370,7 @@ static int events[] = {
 	-1, -1,
 };
 
-TEST_DEVICE("ms-surface-cover",
-	.type = LITEST_MS_SURFACE_COVER,
+TEST_DEVICE(LITEST_MS_SURFACE_COVER,
 	.features = LITEST_KEYS | LITEST_ABSOLUTE | LITEST_RELATIVE | LITEST_FAKE_MT | LITEST_BUTTON | LITEST_WHEEL,
 	.interface = &interface,
 

@@ -28,7 +28,7 @@ options exposed by libinput are:
 - how many tapping fingers are supported by this device
 - a toggle to enable/disable tapping
 - a toggle to enable/disable tap-and-drag, see :ref:`tapndrag`.
-- a toggle to enable/disable tap-and-drag drag lock see :ref:`tapndrag`
+- a toggle to enable/disable tap-and-drag drag lock, see :ref:`tapndrag`
 - The default order is 1, 2, 3 finger tap mapping to left, right, middle
   click, respectively. This order can be changed to left, middle, right click,
   respectively.
@@ -36,6 +36,19 @@ options exposed by libinput are:
 Tapping is usually available on touchpads and the touchpad part of external
 graphics tablets. Tapping is usually **not** available on touch screens,
 for those devices it is expected to be implemented by the toolkit.
+
+------------------------------------------------------------------------------
+Three-finger drag
+------------------------------------------------------------------------------
+
+Three-finger drag allows emulates the mouse button down while three fingers
+are down on a touchpad without the need to press a physical button or use
+:ref:`tapndrag`. See :ref:`drag_3fg` for details on how this feature works.
+
+Three-finger drag is usually available on touchpads and the touchpad part of
+external graphics tablets. Three-finger drag is usually **not** available on
+touch screens, for those devices it is expected to be implemented by the
+toolkit.
 
 ------------------------------------------------------------------------------
 Send Events Mode
@@ -191,3 +204,16 @@ the given threshold is met, and will reach the maximum logical pressure
 before the maximum hardware-supported pressure is reached.
 
 See :ref:`tablet-pressure-range` for more info.
+
+------------------------------------------------------------------------------
+Area configuration
+------------------------------------------------------------------------------
+
+Area configuration is available for some indirect input devices such as
+graphics tablets. This configuration allows reducing the active area of
+such a device to a subset of the physically possible area.
+
+An example use-case for this is to match the aspect ratio of the device to that
+of the screen.
+
+See :ref:`tablet-area` for more info.

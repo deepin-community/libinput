@@ -546,8 +546,7 @@ tp_process_absolute(struct tp_dispatch *tp,
 		if (e->value != -1) {
 			tp->nactive_slots += 1;
 			tp_new_touch(tp, t, time);
-		} else {
-			assert(tp->nactive_slots >= 1);
+		} else if (tp->nactive_slots >= 1) {
 			tp->nactive_slots -= 1;
 			tp_end_sequence(tp, t, time);
 		}
@@ -1812,7 +1811,7 @@ tp_process_state(struct tp_dispatch *tp, uint64_t time)
 	    tp->buttons.is_clickpad)
 		tp_pin_fingers(tp);
 
-	tp_gesture_handle_state(tp, time);
+	tp_gesture_update_finger_state(tp, time);
 }
 
 static void
@@ -1911,6 +1910,7 @@ tp_handle_state(struct tp_dispatch *tp,
 
 	tp_clickpad_middlebutton_apply_config(tp->device);
 	tp_apply_rotation(tp->device);
+	tp_3fg_drag_apply_config(tp->device);
 }
 
 LIBINPUT_UNUSED
@@ -2024,6 +2024,7 @@ tp_interface_destroy(struct evdev_dispatch *dispatch)
 	libinput_timer_destroy(&tp->tap.timer);
 	libinput_timer_destroy(&tp->gesture.finger_count_switch_timer);
 	libinput_timer_destroy(&tp->gesture.hold_timer);
+	libinput_timer_destroy(&tp->gesture.drag_3fg_timer);
 	free(tp->touches);
 	free(tp);
 }
@@ -2249,6 +2250,12 @@ tp_keyboard_timeout(uint64_t now, void *data)
 }
 
 static inline bool
+tp_key_is_shift(unsigned int keycode)
+{
+	return keycode == KEY_LEFTSHIFT || keycode == KEY_RIGHTSHIFT;
+}
+
+static inline bool
 tp_key_is_modifier(unsigned int keycode)
 {
 	switch (keycode) {
@@ -2320,10 +2327,14 @@ tp_keyboard_event(uint64_t time, struct libinput_event *event, void *data)
 		return;
 
 	/* modifier keys don't trigger disable-while-typing so things like
-	 * ctrl+zoom or ctrl+click are possible */
+	 * ctrl+zoom or ctrl+click are possible.
+	 * The exception is shift which we don't trigger DWT for on its own
+	 * but we do trigger DWT for once we type some other key.
+	 */
 	is_modifier = tp_key_is_modifier(key);
 	if (is_modifier) {
-		long_set_bit(tp->dwt.mod_mask, key);
+		if (!tp_key_is_shift(key))
+			long_set_bit(tp->dwt.mod_mask, key);
 		return;
 	}
 

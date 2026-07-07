@@ -24,7 +24,6 @@
 
 #include "config.h"
 
-#include <check.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -58,10 +57,14 @@
 
 #include "util-files.h"
 #include "litest.h"
+#include "litest-runner.h"
 #include "litest-int.h"
 #include "libinput-util.h"
 #include "quirks.h"
 #include "builddir.h"
+
+#include "util-backtrace.h"
+#include "util-libinput.h"
 
 #include <linux/kd.h>
 
@@ -80,10 +83,20 @@ static bool in_debugger = false;
 static bool verbose = false;
 static bool run_deviceless = false;
 static bool use_system_rules_quirks = false;
+static bool exit_first = false;
+static FILE * outfile = NULL;
 static const char *filter_test = NULL;
 static const char *filter_device = NULL;
 static const char *filter_group = NULL;
-static const char *xml_prefix = NULL;
+static int filter_rangeval = INT_MIN;
+static bool use_colors = false;
+
+struct param_filter {
+	char name[64];
+	char glob[64];
+};
+struct param_filter filter_params[8]; /* name=NULL terminated */
+
 static struct quirks_context *quirks_context;
 
 struct created_file {
@@ -91,12 +104,26 @@ struct created_file {
 	char *path;
 };
 
-static struct list created_files_list; /* list of all files to remove at the end
-					  of the test run */
+static void
+created_file_destroy(struct created_file *f)
+{
+	list_remove(&f->link);
+	free(f->path);
+	free(f);
+}
+
+static void
+created_file_unlink(struct created_file *f)
+{
+	unlink(f->path);
+	rmdir(f->path);
+}
+
+static struct suite *current_suite = NULL;
 
 static void litest_init_udev_rules(struct list *created_files_list);
 static void litest_remove_udev_rules(struct list *created_files_list);
-static void litest_print_event(struct libinput_event *event);
+static void litest_print_event(struct libinput_event *event, const char *message);
 
 enum quirks_setup_mode {
 	QUIRKS_SETUP_USE_SRCDIR,
@@ -115,56 +142,48 @@ static void litest_setup_quirks(struct list *created_files_list,
 #define litest_vlog(...) { /* __VA_ARGS__ */ }
 #endif
 
-static void
-litest_backtrace(void)
+LIBINPUT_ATTRIBUTE_PRINTF(4, 5)
+void
+_litest_checkpoint(const char *func,
+		   int line,
+		   const char *color,
+		   const char *format,
+		   ...)
 {
-#if HAVE_GSTACK
-	pid_t parent, child;
-	int pipefd[2];
-
-	if (RUNNING_ON_VALGRIND) {
-		litest_log("  Using valgrind, omitting backtrace\n");
-		return;
-	}
-
-	if (pipe(pipefd) == -1)
-		return;
-
-	parent = getpid();
-	child = fork();
-
-	if (child == 0) {
-		char pid[8];
-
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-
-		sprintf(pid, "%d", parent);
-
-		execlp("gstack", "gstack", pid, NULL);
-		exit(errno);
-	}
-
-	/* parent */
 	char buf[1024];
-	int status, nread;
+	va_list args;
 
-	close(pipefd[1]);
-	waitpid(child, &status, 0);
-
-	status = WEXITSTATUS(status);
-	if (status != 0) {
-		litest_log("ERROR: gstack failed, no backtrace available: %s\n",
-			   strerror(status));
-	} else {
-		litest_log("\nBacktrace:\n");
-		while ((nread = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
-			buf[nread] = '\0';
-			litest_log("%s", buf);
-		}
-		litest_log("\n");
+	va_start(args, format);
+	if (verbose) {
+		vsnprintf(buf, sizeof(buf), format, args);
+		fprintf(stderr,
+			"%s%s():%d - %s%s%s\n",
+			use_colors ? ANSI_BRIGHT_BLUE : "",
+			func, line,
+			use_colors ? color : "",
+			buf,
+			use_colors ? ANSI_NORMAL : "");
 	}
-	close(pipefd[0]);
+	va_end(args);
+}
+
+void
+litest_backtrace(const char *func)
+{
+#ifndef LITEST_DISABLE_BACKTRACE_LOGGING
+	if (RUNNING_ON_VALGRIND) {
+		fprintf(stderr, "Using valgrind, omitting backtrace\n");
+		return;
+	}
+	char buf[256];
+
+	snprintf(buf, sizeof(buf), "in %s", func);
+
+	backtrace_print(stderr,
+			use_colors,
+			"in litest_backtrace",
+			"in litest_runner_test_run",
+			func ? buf : NULL);
 #endif
 }
 
@@ -181,15 +200,17 @@ litest_fail_condition(const char *file,
 	litest_log("FAILED: %s\n", condition);
 
 	if (message) {
+		char buf[1024];
 		va_list args;
 		va_start(args, message);
-		litest_vlog(message, args);
+		vsnprintf(buf, sizeof(buf), message, args);
 		va_end(args);
+		litest_log("%s\n", buf);
 	}
 
 	litest_log("in %s() (%s:%d)\n", func, file, line);
-	litest_backtrace();
-	abort();
+	litest_backtrace(func);
+	litest_runner_abort();
 }
 
 __attribute__((noreturn))
@@ -206,8 +227,8 @@ litest_fail_comparison_int(const char *file,
 	litest_log("FAILED COMPARISON: %s %s %s\n", astr, operator, bstr);
 	litest_log("Resolved to: %d %s %d\n", a, operator, b);
 	litest_log("in %s() (%s:%d)\n", func, file, line);
-	litest_backtrace();
-	abort();
+	litest_backtrace(func);
+	litest_runner_abort();
 }
 
 __attribute__((noreturn))
@@ -224,8 +245,8 @@ litest_fail_comparison_double(const char *file,
 	litest_log("FAILED COMPARISON: %s %s %s\n", astr, operator, bstr);
 	litest_log("Resolved to: %.3f %s %.3f\n", a, operator, b);
 	litest_log("in %s() (%s:%d)\n", func, file, line);
-	litest_backtrace();
-	abort();
+	litest_backtrace(func);
+	litest_runner_abort();
 }
 
 __attribute__((noreturn))
@@ -237,8 +258,25 @@ litest_fail_comparison_ptr(const char *file,
 {
 	litest_log("FAILED COMPARISON: %s\n", comparison);
 	litest_log("in %s() (%s:%d)\n", func, file, line);
-	litest_backtrace();
-	abort();
+	litest_backtrace(func);
+	litest_runner_abort();
+}
+
+__attribute__((noreturn))
+void
+litest_fail_comparison_str(const char *file,
+			   int line,
+			   const char *func,
+			   const char *comparison,
+			   const char *operator,
+			   const char *astr,
+			   const char *bstr)
+{
+	litest_log("FAILED COMPARISON: %s %s %s\n", astr, operator, bstr);
+	litest_log("Resolved to: %s %s %s\n", astr, operator, bstr);
+	litest_log("in %s() (%s:%d)\n", func, file, line);
+	litest_backtrace(func);
+	litest_runner_abort();
 }
 
 struct test {
@@ -250,7 +288,10 @@ struct test {
 	void *teardown;
 
 	struct range range;
+	int rangeval;
 	bool deviceless;
+
+	struct litest_test_parameters *params;
 };
 
 struct suite {
@@ -259,11 +300,358 @@ struct suite {
 	char *name;
 };
 
+struct litest_parameter_value {
+	size_t refcnt;
+	struct list link; /* litest_parameter->values */
+
+	struct multivalue value;
+};
+
+struct litest_parameter {
+	size_t refcnt;
+	struct list link; /* litest_parameters.params */
+	char name[128];
+	char type; /* One of u, i, d, c, s, b */
+
+	struct list values; /* litest_parameter_value */
+};
+
+struct litest_parameters {
+	size_t refcnt;
+	struct list params; /* struct litest_parameter */
+};
+
+static struct litest_parameter_value *
+litest_parameter_value_new(void)
+{
+	struct litest_parameter_value *pv = zalloc(sizeof *pv);
+
+	list_init(&pv->link);
+	pv->refcnt = 1;
+
+	return pv;
+}
+
+static inline void
+litest_parameter_add_string(struct litest_parameter *p, const char *s)
+{
+	assert(p->type == 's');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_string(s);
+	list_append(&p->values, &pv->link);
+}
+
+static inline void
+litest_parameter_add_char(struct litest_parameter *p, char c)
+{
+	assert(p->type == 'c');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_char(c);
+	list_append(&p->values, &pv->link);
+}
+
+static inline void
+litest_parameter_add_bool(struct litest_parameter *p, bool b)
+{
+	assert(p->type == 'b');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_bool(b);
+	list_append(&p->values, &pv->link);
+}
+
+static inline void
+litest_parameter_add_u32(struct litest_parameter *p, uint32_t u)
+{
+	assert(p->type == 'u');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_u32(u);
+	list_append(&p->values, &pv->link);
+}
+
+static inline void
+litest_parameter_add_i32(struct litest_parameter *p, int32_t i)
+{
+	assert(p->type == 'i');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_i32(i);
+	list_append(&p->values, &pv->link);
+}
+
+static void
+litest_parameter_add_double(struct litest_parameter *p, double d)
+{
+	assert(p->type == 'd');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_double(d);
+	list_append(&p->values, &pv->link);
+}
+
+static inline void
+litest_parameter_add_named_i32(struct litest_parameter *p, const struct litest_named_i32 i)
+{
+	assert(p->type == 'I');
+
+	struct litest_parameter_value *pv = litest_parameter_value_new();
+	pv->value = multivalue_new_named_i32(i.value, i.name);
+	list_append(&p->values, &pv->link);
+}
+
+#if 0
+static struct litest_parameter_value *
+litest_parameter_value_ref(struct litest_parameter_value *pv) {
+	assert(pv);
+	assert(pv->refcnt > 0);
+	pv->refcnt++;
+	return pv;
+}
+#endif
+
+static struct litest_parameter_value *
+litest_parameter_value_unref(struct litest_parameter_value *pv) {
+	if (pv) {
+		assert(pv->refcnt > 0);
+		if (--pv->refcnt == 0) {
+			list_remove(&pv->link);
+			free(pv);
+		}
+	}
+	return NULL;
+}
+
+static struct litest_parameter*
+litest_parameter_new(const char *name, char type)
+{
+	struct litest_parameter *p = zalloc(sizeof *p);
+
+	switch (type) {
+	case 'b':
+	case 'c':
+	case 'd':
+	case 'i':
+	case 'I':
+	case 's':
+	case 'u':
+		  break;
+	default:
+		  assert(!"Type not yet implemented");
+	}
+
+	list_init(&p->link);
+	list_init(&p->values);
+	snprintf(p->name, sizeof(p->name), "%s", name);
+	p->type = type;
+	p->refcnt = 1;
+
+	return p;
+}
+
+static struct litest_parameter *
+litest_parameter_ref(struct litest_parameter *p) {
+	assert(p);
+	assert(p->refcnt > 0);
+	p->refcnt++;
+	return p;
+}
+
+static struct litest_parameter *
+litest_parameter_unref(struct litest_parameter *p) {
+	if (p) {
+		assert(p->refcnt > 0);
+		if (--p->refcnt == 0) {
+			struct litest_parameter_value *pv;
+			list_for_each_safe(pv, &p->values, link) {
+				litest_parameter_value_unref(pv);
+			}
+			list_remove(&p->link);
+			free(p);
+		}
+	}
+	return NULL;
+}
+
+static void
+litest_parameters_add(struct litest_parameters *ps, struct litest_parameter *param)
+{
+	struct litest_parameter *p;
+	list_for_each(p, &ps->params, link) {
+		assert(!streq(p->name, param->name));
+	}
+
+	litest_parameter_ref(param);
+	list_append(&ps->params, &param->link);
+}
+
+struct litest_parameters *
+_litest_parameters_new(const char *name, ...) {
+	struct litest_parameters *ps = zalloc(sizeof *ps);
+
+	list_init(&ps->params);
+	ps->refcnt = 1;
+
+	va_list args;
+	va_start(args, name);
+
+	while (name) {
+		char type = va_arg(args, int);
+
+		struct litest_parameter *param = litest_parameter_new(name, type);
+		if (type == 'b') {
+			litest_parameter_add_bool(param, true);
+			litest_parameter_add_bool(param, false);
+		} else {
+			unsigned int nargs = va_arg(args, unsigned int);
+			for (unsigned int _ = 0; _ < nargs; _++) {
+				switch (type) {
+				case 'c': {
+					char b = va_arg(args, int);
+					litest_parameter_add_char(param, b);
+					break;
+				}
+				case 'u': {
+					uint32_t b = va_arg(args, uint32_t);
+					litest_parameter_add_u32(param, b);
+					break;
+				}
+				case 'i': {
+					int32_t b = va_arg(args, int32_t);
+					litest_parameter_add_i32(param, b);
+					break;
+				}
+				case 'd': {
+					double b = va_arg(args, double);
+					litest_parameter_add_double(param, b);
+					break;
+				}
+				case 's': {
+					const char *s = va_arg(args, const char *);
+					litest_parameter_add_string(param, s);
+					break;
+				}
+				case 'I': {
+					struct litest_named_i32 p = va_arg(args, struct litest_named_i32);
+					litest_parameter_add_named_i32(param, p);
+					break;
+				}
+				default:
+					abort();
+					break;
+				}
+			}
+		}
+
+		litest_parameters_add(ps, param);
+		litest_parameter_unref(param);
+		name = va_arg(args, const char *);
+	}
+
+	va_end(args);
+
+	return ps;
+}
+
+struct litest_parameters *
+litest_parameters_ref(struct litest_parameters *p) {
+	assert(p);
+	assert(p->refcnt > 0);
+	p->refcnt++;
+	return p;
+}
+
+struct litest_parameters *
+litest_parameters_unref(struct litest_parameters *params) {
+	if (params) {
+		assert(params->refcnt > 0);
+		if (--params->refcnt == 0) {
+			struct litest_parameter *p;
+			list_for_each_safe(p, &params->params, link) {
+				litest_parameter_unref(p);
+			}
+			free(params);
+		}
+	}
+	return NULL;
+}
+
+static inline int
+_permutate(struct litest_parameters_permutation *permutation,
+	   struct list *next_param,
+	   void *list_head,
+	   litest_parameters_permutation_func_t func,
+	   void *userdata)
+{
+	if (next_param->next == list_head) {
+		func(permutation, userdata);
+		return 0;
+	}
+	struct litest_parameter_value *pv;
+	struct litest_parameter *param = list_first_entry(next_param, param, link);
+	list_for_each(pv, &param->values, link) {
+		struct litest_parameters_permutation_value v  = {
+			.value = pv->value,
+		};
+
+		memcpy(v.name, param->name, min(sizeof(v.name), sizeof(param->name)));
+
+		list_append(&permutation->values, &v.link);
+		int rc = _permutate(permutation, &param->link, list_head, func, userdata);
+		if (rc)
+			return rc;
+		list_remove(&v.link);
+	}
+
+	return 0;
+}
+
+/**
+ * Calls the given function func with each permutation of
+ * the given test parameters.
+ */
+int
+litest_parameters_permutations(struct litest_parameters *params,
+			       litest_parameters_permutation_func_t func,
+			       void *userdata)
+{
+
+	struct litest_parameters_permutation permutation;
+	list_init(&permutation.values);
+
+	return _permutate(&permutation, &params->params, &params->params, func, userdata);
+}
+
 static struct litest_device *current_device;
 
 struct litest_device *litest_current_device(void)
 {
 	return current_device;
+}
+
+int
+_litest_dispatch(struct libinput *li,
+		 const char *func,
+		 int line)
+{
+	static int dispatch_counter = 0;
+
+	++dispatch_counter;
+
+	_litest_checkpoint(func, line, ANSI_MAGENTA,
+			   "┌────────────────────  dispatch %3d ────────────────────┐",
+			   dispatch_counter);
+	int rc = libinput_dispatch(li);
+	enum libinput_event_type type = libinput_next_event_type(li);
+
+	const char *evtype = type == LIBINPUT_EVENT_NONE ? "NONE" : litest_event_type_str(type);
+	_litest_checkpoint(func, line, ANSI_MAGENTA,
+			   "└──────────────────── /dispatch %3d ────────────────────┘ pending %s",
+			   dispatch_counter,
+			   evtype);
+	return rc;
 }
 
 static void
@@ -288,12 +676,12 @@ grab_device(struct litest_device *device, bool mode)
 	list_for_each(p, &ctx->paths, link) {
 		if (streq(p->path, devnode)) {
 			int rc = ioctl(p->fd, EVIOCGRAB, (void*)mode ? 1 : 0);
-			ck_assert_int_gt(rc, -1);
+			litest_assert_errno_success(rc);
 			udev_device_unref(udev_device);
 			return;
 		}
 	}
-	litest_abort_msg("Failed to find device %s to %sgrab\n",
+	litest_abort_msg("Failed to find device %s to %sgrab",
 			 devnode, mode ? "" : "un");
 }
 
@@ -320,9 +708,9 @@ void litest_generic_device_teardown(void)
 	current_device = NULL;
 }
 
-static struct list devices;
+static struct list devices = LIST_INIT(devices); /* struct litest_test_device */
 
-static struct list all_tests;
+static struct list all_test_suites = LIST_INIT(all_test_suites); /* struct suite */
 
 static inline void
 litest_system(const char *command)
@@ -351,6 +739,12 @@ litest_reload_udev_rules(void)
 	litest_system("udevadm control --reload-rules");
 }
 
+static bool
+filter_for_rangeval(const struct range *range, int rangeval)
+{
+	return !range || filter_rangeval == INT_MIN || filter_rangeval == rangeval;
+}
+
 static void
 litest_add_tcase_for_device(struct suite *suite,
 			    const char *funcname,
@@ -358,19 +752,122 @@ litest_add_tcase_for_device(struct suite *suite,
 			    const struct litest_test_device *dev,
 			    const struct range *range)
 {
+	const struct range no_range = range_init_empty();
+
+	if (run_deviceless)
+		return;
+
+	if (!range)
+		range = &no_range;
+
+	int rangeval = range->lower;
+	do {
+		if (filter_for_rangeval(range, rangeval)) {
+			struct test *t;
+
+			t = zalloc(sizeof(*t));
+			t->name = safe_strdup(funcname);
+			t->devname = safe_strdup(dev->shortname);
+			t->func = func;
+			t->setup = dev->setup;
+			t->teardown = dev->teardown ?
+					dev->teardown : litest_generic_device_teardown;
+			if (range)
+				t->range = *range;
+			t->rangeval = rangeval;
+
+			list_append(&suite->tests, &t->node);
+		}
+	} while (++rangeval < range->upper);
+}
+
+struct permutation_userdata
+{
+	struct suite *suite;
+	const char *funcname;
+	const void *func;
+	const struct litest_test_device *dev;
+	char devname[64]; /* set if dev == NULL */
+
+	const struct param_filter *param_filters; /* name=NULL terminated */
+};
+
+static int
+permutation_func(struct litest_parameters_permutation *permutation, void *userdata)
+{
+	struct permutation_userdata *data = userdata;
+
+	struct litest_test_parameters *params = litest_test_parameters_new();
+	struct litest_parameters_permutation_value *pmv;
+	bool filtered = false;
+	list_for_each(pmv, &permutation->values, link) {
+		const struct param_filter *f = data->param_filters;
+		while (!filtered && strlen(f->name)) {
+			if (streq(pmv->name, f->name)) {
+				char *s = multivalue_as_str(&pmv->value);
+				if (fnmatch(f->glob, s, 0) != 0)
+					filtered = true;
+				free(s);
+			}
+			f++;
+		}
+
+		if (filtered)
+			break;
+
+		struct litest_test_param *tp = zalloc(sizeof *tp);
+		snprintf(tp->name, sizeof(tp->name), "%s", pmv->name);
+		tp->value = multivalue_copy(&pmv->value);
+		list_append(&params->test_params, &tp->link);
+	}
+
+	if (filtered) {
+		litest_test_parameters_unref(params);
+		return 0;
+	}
+
 	struct test *t;
 
 	t = zalloc(sizeof(*t));
-	t->name = safe_strdup(funcname);
-	t->devname = safe_strdup(dev->shortname);
-	t->func = func;
-	t->setup = dev->setup;
-	t->teardown = dev->teardown ?
-			dev->teardown : litest_generic_device_teardown;
-	if (range)
-		t->range = *range;
+	t->name = safe_strdup(data->funcname);
+	t->func = data->func;
+	if (data->dev) {
+		t->devname = safe_strdup(data->dev->shortname);
+		t->setup = data->dev->setup;
+		t->teardown = data->dev->teardown ?
+				data->dev->teardown : litest_generic_device_teardown;
+	} else {
+		t->devname = safe_strdup(data->devname);
+		t->setup = NULL;
+		t->teardown = NULL;
+	}
+	t->rangeval = 0;
+	t->params = params;
 
-	list_insert(&suite->tests, &t->node);
+	list_append(&data->suite->tests, &t->node);
+
+	return 0;
+}
+
+static void
+litest_add_tcase_for_device_with_params(struct suite *suite,
+					const char *funcname,
+					const void *func,
+					const struct litest_test_device *dev,
+					struct litest_parameters *params)
+{
+	if (run_deviceless)
+		return;
+
+	struct permutation_userdata data = {
+		.suite = suite,
+		.funcname = funcname,
+		.func = func,
+		.dev = dev,
+		.param_filters = filter_params,
+	};
+
+	litest_parameters_permutations(params, permutation_func, &data);
 }
 
 static void
@@ -379,23 +876,63 @@ litest_add_tcase_no_device(struct suite *suite,
 			   const char *funcname,
 			   const struct range *range)
 {
-	struct test *t;
+	const char *test_name = funcname;
+	const struct range no_range = range_init_empty();
+
+	if (filter_device &&
+	    fnmatch(filter_device, test_name, 0) != 0)
+		return;
+
+	if (run_deviceless)
+		return;
+
+	if (!range)
+		range = &no_range;
+
+	int rangeval = range->lower;
+	do {
+		if (filter_for_rangeval(range, rangeval)) {
+			struct test *t;
+
+			t = zalloc(sizeof(*t));
+			t->name = safe_strdup(test_name);
+			t->devname = safe_strdup("no device");
+			t->func = func;
+			if (range)
+				t->range = *range;
+			t->rangeval = rangeval;
+			t->setup = NULL;
+			t->teardown = NULL;
+
+			list_append(&suite->tests, &t->node);
+		}
+	} while (++rangeval < range->upper);
+}
+
+static void
+litest_add_tcase_no_device_with_params(struct suite *suite,
+				       const void *func,
+				       const char *funcname,
+				       struct litest_parameters *params)
+{
 	const char *test_name = funcname;
 
 	if (filter_device &&
 	    fnmatch(filter_device, test_name, 0) != 0)
 		return;
 
-	t = zalloc(sizeof(*t));
-	t->name = safe_strdup(test_name);
-	t->devname = safe_strdup("no device");
-	t->func = func;
-	if (range)
-		t->range = *range;
-	t->setup = NULL;
-	t->teardown = NULL;
+	if (run_deviceless)
+		return;
 
-	list_insert(&suite->tests, &t->node);
+	struct permutation_userdata data = {
+		.suite = suite,
+		.funcname = funcname,
+		.func = func,
+		.param_filters = filter_params,
+	};
+	snprintf(data.devname, sizeof(data.devname), "no device");
+
+	litest_parameters_permutations(params, permutation_func, &data);
 }
 
 static void
@@ -404,57 +941,58 @@ litest_add_tcase_deviceless(struct suite *suite,
 			    const char *funcname,
 			    const struct range *range)
 {
-	struct test *t;
+	const char *test_name = funcname;
+	const struct range no_range = range_init_empty();
+
+	if (filter_device &&
+	    fnmatch(filter_device, test_name, 0) != 0)
+		return;
+
+	if (!range)
+		range = &no_range;
+
+	int rangeval = range->lower;
+	do {
+		if (filter_for_rangeval(range, rangeval)) {
+			struct test *t;
+
+			t = zalloc(sizeof(*t));
+			t->deviceless = true;
+			t->name = safe_strdup(test_name);
+			t->devname = safe_strdup("deviceless");
+			t->func = func;
+			if (range)
+				t->range = *range;
+			t->rangeval = rangeval;
+			t->setup = NULL;
+			t->teardown = NULL;
+
+			list_append(&suite->tests, &t->node);
+		}
+	} while (++rangeval < range->upper);
+}
+
+static void
+litest_add_tcase_deviceless_with_params(struct suite *suite,
+					const void *func,
+					const char *funcname,
+					struct litest_parameters *params)
+{
 	const char *test_name = funcname;
 
 	if (filter_device &&
 	    fnmatch(filter_device, test_name, 0) != 0)
 		return;
 
-	t = zalloc(sizeof(*t));
-	t->deviceless = true;
-	t->name = safe_strdup(test_name);
-	t->devname = safe_strdup("deviceless");
-	t->func = func;
-	if (range)
-		t->range = *range;
-	t->setup = NULL;
-	t->teardown = NULL;
+	struct permutation_userdata data = {
+		.suite = suite,
+		.funcname = funcname,
+		.func = func,
+		.param_filters = filter_params,
+	};
+	snprintf(data.devname, sizeof(data.devname), "deviceless");
 
-	list_insert(&suite->tests, &t->node);
-}
-
-static struct suite *
-get_suite(const char *name)
-{
-	struct suite *s;
-
-	list_for_each(s, &all_tests, node) {
-		if (streq(s->name, name))
-			return s;
-	}
-
-	s = zalloc(sizeof(*s));
-	s->name = safe_strdup(name);
-
-	list_init(&s->tests);
-	list_insert(&all_tests, &s->node);
-
-	return s;
-}
-
-static void
-create_suite_name(const char *filename, char suitename[64])
-{
-	char *trunk = trunkname(filename);
-	char *p = trunk;
-
-	/* strip the test- prefix */
-	if (strstartswith(trunk, "test-"))
-		p += 5;
-
-	snprintf(suitename, 64, "%s", p);
-	free(trunk);
+	litest_parameters_permutations(params, permutation_func, &data);
 }
 
 static void
@@ -463,10 +1001,9 @@ litest_add_tcase(const char *filename,
 		 const void *func,
 		 int64_t required,
 		 int64_t excluded,
-		 const struct range *range)
+		 const struct range *range,
+		 struct litest_parameters *params)
 {
-	char suite_name[65];
-	struct suite *suite;
 	bool added = false;
 
 	litest_assert(required >= LITEST_DEVICELESS);
@@ -476,20 +1013,24 @@ litest_add_tcase(const char *filename,
 	    fnmatch(filter_test, funcname, 0) != 0)
 		return;
 
-	create_suite_name(filename, suite_name);
+	struct suite *suite = current_suite;
 
-	if (filter_group && fnmatch(filter_group, suite_name, 0) != 0)
+	if (filter_group && fnmatch(filter_group, suite->name, 0) != 0)
 		return;
-
-	suite = get_suite(suite_name);
 
 	if (required == LITEST_DEVICELESS &&
 	    excluded == LITEST_DEVICELESS) {
-		litest_add_tcase_deviceless(suite, func, funcname, range);
+		if (params)
+			litest_add_tcase_deviceless_with_params(suite, func, funcname, params);
+		else
+			litest_add_tcase_deviceless(suite, func, funcname, range);
 		added = true;
 	} else if (required == LITEST_DISABLE_DEVICE &&
 	    excluded == LITEST_DISABLE_DEVICE) {
-		litest_add_tcase_no_device(suite, func, funcname, range);
+		if (params)
+			litest_add_tcase_no_device_with_params(suite, func, funcname, params);
+		else
+			litest_add_tcase_no_device(suite, func, funcname, range);
 		added = true;
 	} else if (required != LITEST_ANY || excluded != LITEST_ANY) {
 		struct litest_test_device *dev;
@@ -505,11 +1046,19 @@ litest_add_tcase(const char *filename,
 			    (dev->features & excluded) != 0)
 				continue;
 
-			litest_add_tcase_for_device(suite,
-						    funcname,
-						    func,
-						    dev,
-						    range);
+			if (params) {
+				litest_add_tcase_for_device_with_params(suite,
+									funcname,
+									func,
+									dev,
+									params);
+			} else {
+				litest_add_tcase_for_device(suite,
+							    funcname,
+							    func,
+							    dev,
+							    range);
+			}
 			added = true;
 		}
 	} else {
@@ -523,11 +1072,19 @@ litest_add_tcase(const char *filename,
 			    fnmatch(filter_device, dev->shortname, 0) != 0)
 				continue;
 
-			litest_add_tcase_for_device(suite,
-						    funcname,
-						    func,
-						    dev,
-						    range);
+			if (params) {
+				litest_add_tcase_for_device_with_params(suite,
+									funcname,
+									func,
+									dev,
+									params);
+			} else {
+				litest_add_tcase_for_device(suite,
+							    funcname,
+							    func,
+							    dev,
+							    range);
+			}
 			added = true;
 		}
 	}
@@ -545,6 +1102,18 @@ void
 _litest_add_no_device(const char *name, const char *funcname, const void *func)
 {
 	_litest_add(name, funcname, func, LITEST_DISABLE_DEVICE, LITEST_DISABLE_DEVICE);
+}
+
+void
+_litest_add_parametrized_no_device(const char *name,
+				   const char *funcname,
+				   const void *func,
+				   struct litest_parameters *params)
+{
+	_litest_add_parametrized(name, funcname, func,
+				 LITEST_DISABLE_DEVICE,
+				 LITEST_DISABLE_DEVICE,
+				 params);
 }
 
 void
@@ -575,6 +1144,18 @@ _litest_add_deviceless(const char *name,
 }
 
 void
+_litest_add_parametrized_deviceless(const char *name,
+				    const char *funcname,
+				    const void *func,
+				    struct litest_parameters *params)
+{
+	_litest_add_parametrized(name, funcname, func,
+				 LITEST_DISABLE_DEVICE,
+				 LITEST_DISABLE_DEVICE,
+				 params);
+}
+
+void
 _litest_add(const char *name,
 	    const char *funcname,
 	    const void *func,
@@ -597,7 +1178,18 @@ _litest_add_ranged(const char *name,
 		   int64_t excluded,
 		   const struct range *range)
 {
-	litest_add_tcase(name, funcname, func, required, excluded, range);
+	litest_add_tcase(name, funcname, func, required, excluded, range, NULL);
+}
+
+void
+_litest_add_parametrized(const char *name,
+			 const char *funcname,
+			 const void *func,
+			 int64_t required,
+			 int64_t excluded,
+			 struct litest_parameters *params)
+{
+	litest_add_tcase(name, funcname, func, required, excluded, NULL, params);
 }
 
 void
@@ -616,10 +1208,8 @@ _litest_add_ranged_for_device(const char *filename,
 			      enum litest_device_type type,
 			      const struct range *range)
 {
-	struct suite *s;
 	struct litest_test_device *dev;
 	bool device_filtered = false;
-	char suite_name[64];
 
 	litest_assert(type < LITEST_NO_DEVICE);
 
@@ -627,12 +1217,11 @@ _litest_add_ranged_for_device(const char *filename,
 	    fnmatch(filter_test, funcname, 0) != 0)
 		return;
 
-	create_suite_name(filename, suite_name);
+	struct suite *s = current_suite;
 
-	if (filter_group && fnmatch(filter_group, suite_name, 0) != 0)
+	if (filter_group && fnmatch(filter_group, s->name, 0) != 0)
 		return;
 
-	s = get_suite(suite_name);
 	list_for_each(dev, &devices, node) {
 		if (filter_device &&
 		    fnmatch(filter_device, dev->shortname, 0) != 0) {
@@ -652,7 +1241,50 @@ _litest_add_ranged_for_device(const char *filename,
 
 	/* only abort if no filter was set, that's a bug */
 	if (!device_filtered)
-		litest_abort_msg("Invalid test device type\n");
+		litest_abort_msg("Invalid test device type");
+}
+
+void
+_litest_add_parametrized_for_device(const char *filename,
+				    const char *funcname,
+				    const void *func,
+				    enum litest_device_type type,
+				    struct litest_parameters *params)
+{
+	struct litest_test_device *dev;
+	bool device_filtered = false;
+
+	litest_assert(type < LITEST_NO_DEVICE);
+
+	if (filter_test &&
+	    fnmatch(filter_test, funcname, 0) != 0)
+		return;
+
+	struct suite *s = current_suite;
+
+	if (filter_group && fnmatch(filter_group, s->name, 0) != 0)
+		return;
+
+	list_for_each(dev, &devices, node) {
+		if (filter_device &&
+		    fnmatch(filter_device, dev->shortname, 0) != 0) {
+			device_filtered = true;
+			continue;
+		}
+
+		if (dev->type == type) {
+			litest_add_tcase_for_device_with_params(s,
+								funcname,
+								func,
+								dev,
+								params);
+			return;
+		}
+	}
+
+	/* only abort if no filter was set, that's a bug */
+	if (!device_filtered)
+		litest_abort_msg("Invalid test device type");
 }
 
 LIBINPUT_ATTRIBUTE_PRINTF(3, 0)
@@ -662,12 +1294,8 @@ litest_log_handler(struct libinput *libinput,
 		   const char *format,
 		   va_list args)
 {
-	static int is_tty = -1;
 	const char *priority = NULL;
 	const char *color;
-
-	if (is_tty == -1)
-		is_tty = isatty(STDERR_FILENO);
 
 	switch(pri) {
 	case LIBINPUT_LOG_PRIORITY_INFO:
@@ -686,7 +1314,7 @@ litest_log_handler(struct libinput *libinput,
 		  abort();
 	}
 
-	if (!is_tty)
+	if (!use_colors)
 		color = "";
 	else if (strstr(format, "tap:"))
 		color = ANSI_BLUE;
@@ -702,10 +1330,12 @@ litest_log_handler(struct libinput *libinput,
 		color = ANSI_CYAN;
 	else if (strstr(format, "edge-scroll:"))
 		color = ANSI_BRIGHT_GREEN;
+	else if (strstr(format, "gesture:"))
+		color = ANSI_BRIGHT_YELLOW;
 
 	fprintf(stderr, "%slitest %s ", color, priority);
 	vfprintf(stderr, format, args);
-	if (is_tty)
+	if (use_colors)
 		fprintf(stderr, ANSI_NORMAL);
 
 	if (strstr(format, "client bug: ") ||
@@ -714,17 +1344,17 @@ litest_log_handler(struct libinput *libinput,
 		 * short, don't abort if during a valgrind run we get a
 		 * negative offset */
 		if ((RUNNING_ON_VALGRIND && in_debugger) ||
-		    !strstr(format, "scheduled expiry is in the past")) {
+		    strstr(format, "scheduled expiry is in the past")) {
 			/* noop */
-		} else if (!strstr(format, "event processing lagging behind")) {
+		} else if (strstr(format, "event processing lagging behind")) {
 			/* noop */
 		} else {
-			litest_abort_msg("libinput bug triggered, aborting.\n");
+			litest_abort_msg("libinput bug triggered, aborting.");
 		}
 	}
 
 	if (strstr(format, "Touch jump detected and discarded")) {
-		litest_abort_msg("libinput touch jump triggered, aborting.\n");
+		litest_abort_msg("libinput touch jump triggered, aborting.");
 	}
 }
 
@@ -749,7 +1379,7 @@ litest_init_device_udev_rules(struct litest_test_device *dev, FILE *f)
 	kv = dev->udev_properties;
 	while (kv->key) {
 		fprintf(f, ", \\\n\tENV{%s}=\"%s\"", kv->key, kv->value);
-		if (strneq(kv->key, "EVDEV_ABS_", 10))
+		if (strstartswith(kv->key, "EVDEV_ABS_"))
 			need_keyboard_builtin = true;
 		kv++;
 	}
@@ -816,7 +1446,7 @@ open_restricted(const char *path, int flags, void *userdata)
 	if (fd < 0)
 		return -errno;
 
-	if (strneq(path, prefix, strlen(prefix))) {
+	if (strstartswith(path, prefix)) {
 		p = zalloc(sizeof *p);
 		p->path = safe_strdup(path);
 		p->fd = fd;
@@ -854,62 +1484,6 @@ static struct libinput_interface interface = {
 	.close_restricted = close_restricted,
 };
 
-static void
-litest_signal(int sig)
-{
-	struct created_file *f;
-
-	list_for_each_safe(f, &created_files_list, link) {
-		list_remove(&f->link);
-		unlink(f->path);
-		rmdir(f->path);
-		/* in the sighandler, we can't free */
-	}
-
-	if (fork() == 0) {
-		/* child, we can run system() */
-		litest_reload_udev_rules();
-		exit(0);
-	}
-
-	exit(1);
-}
-
-static inline void
-litest_setup_sighandler(int sig)
-{
-	struct sigaction act, oact;
-	int rc;
-
-	sigemptyset(&act.sa_mask);
-	sigaddset(&act.sa_mask, sig);
-	act.sa_flags = 0;
-	act.sa_handler = litest_signal;
-	rc = sigaction(sig, &act, &oact);
-	litest_assert_int_ne(rc, -1);
-}
-
-static void
-litest_free_test_list(struct list *tests)
-{
-	struct suite *s;
-
-	list_for_each_safe(s, tests, node) {
-		struct test *t;
-
-		list_for_each_safe(t, &s->tests, node) {
-			free(t->name);
-			free(t->devname);
-			list_remove(&t->node);
-			free(t);
-		}
-
-		list_remove(&s->node);
-		free(s->name);
-		free(s);
-	}
-}
-
 LIBINPUT_ATTRIBUTE_PRINTF(3, 0)
 static inline void
 quirk_log_handler(struct libinput *unused,
@@ -923,85 +1497,10 @@ quirk_log_handler(struct libinput *unused,
 	vfprintf(stderr, format, args);
 }
 
-static void
-litest_export_xml(SRunner *sr, const char *xml_prefix)
+static enum litest_runner_result
+init_quirks(void *userdata)
 {
-	TestResult **results;
-	int nresults, nfailed;
-	char *filename;
-	int fd;
-
-	/* This is the minimum-effort implementation here because its only
-	 * real purpose is to make test logs look pretty in the gitlab CI.
-	 *
-	 * Which means:
-	 * - there's no filename validation, if you supply a filename that
-	 *   mkstemps doesn't like, things go boom.
-	 * - every fork writes out a separate junit.xml file. gitlab is better
-	 *   at collecting lots of files than I am at writing code to collect
-	 *   this across forks to write out only one file.
-	 * - most of the content is pretty useless because libcheck only gives
-	 *   us minimal information. the libcheck XML file has more info like
-	 *   the duration of each test but it's more complicated to extract
-	 *   and we don't need it for now.
-	 */
-	filename = safe_strdup(xml_prefix);
-	fd = mkstemps(filename, 4);
-
-	results = srunner_results(sr);
-	nresults = srunner_ntests_run(sr);
-	nfailed = srunner_ntests_failed(sr);
-
-	dprintf(fd, "<?xml version=\"1.0\"?>\n");
-	dprintf(fd, "<testsuites id=\"%s\" tests=\"%d\" failures=\"%d\">\n",
-		filename,
-		nresults,
-		nfailed);
-	dprintf(fd, "  <testsuite>\n");
-	for (int i = 0; i < nresults; i++) {
-		TestResult *r = results[i];
-
-		dprintf(fd, "    <testcase id=\"%s\" name=\"%s\" %s>\n",
-			tr_tcname(r),
-			tr_tcname(r),
-			tr_rtype(r) == CK_PASS ? "/" : "");
-		if (tr_rtype(r) != CK_PASS) {
-			dprintf(fd, "      <failure message=\"%s:%d\">\n",
-				tr_lfile(r),
-				tr_lno(r));
-			dprintf(fd, "        %s:%d\n", tr_lfile(r), tr_lno(r));
-			dprintf(fd, "        %s\n", tr_tcname(r));
-			dprintf(fd, "\n");
-			dprintf(fd, "        %s\n", tr_msg(r));
-			dprintf(fd, "      </failure>\n");
-			dprintf(fd, "    </testcase>\n");
-		}
-	}
-	dprintf(fd, "  </testsuite>\n");
-	dprintf(fd, "</testsuites>\n");
-
-	free(results);
-	close(fd);
-	free(filename);
-}
-
-static int
-litest_run_suite(struct list *tests, int which, int max, int error_fd)
-{
-	int failed = 0;
-	SRunner *sr = NULL;
-	struct suite *s;
-	struct test *t;
-	int count = -1;
-	struct name {
-		struct list node;
-		char *name;
-	};
-	struct name *n;
-	struct list testnames;
-	const char *data_path;
-
-	data_path = getenv("LIBINPUT_QUIRKS_DIR");
+	const char *data_path = getenv("LIBINPUT_QUIRKS_DIR");
 	if (!data_path)
 		data_path = LIBINPUT_QUIRKS_DIR;
 
@@ -1011,170 +1510,86 @@ litest_run_suite(struct list *tests, int which, int max, int error_fd)
 					       NULL,
 					       QLOG_LIBINPUT_LOGGING);
 
-	/* Check just takes the suite/test name pointers but doesn't strdup
-	 * them - we have to keep them around */
-	list_init(&testnames);
+	return LITEST_PASS;
+}
 
-	/* For each test, create one test suite with one test case, then
-	   add it to the test runner. The only benefit suites give us in
-	   check is that we can filter them, but our test runner has a
-	   --filter-group anyway. */
-	list_for_each(s, tests, node) {
-		list_for_each(t, &s->tests, node) {
-			Suite *suite;
-			TCase *tc;
-			char *sname, *tname;
-
-			/* We run deviceless tests as part of the normal
-			 * test suite runner, just in case. Filtering
-			 * all the other ones out just for the case where
-			 * we can't run the full runner.
-			 */
-			if (run_deviceless && !t->deviceless)
-				continue;
-
-			count = (count + 1) % max;
-			if (max != 1 && (count % max) != which)
-				continue;
-
-			xasprintf(&sname,
-				  "%s:%s:%s",
-				  s->name,
-				  t->name,
-				  t->devname);
-			litest_assert_ptr_notnull(sname);
-			n = zalloc(sizeof(*n));
-			n->name = sname;
-			list_insert(&testnames, &n->node);
-
-			xasprintf(&tname,
-				  "%s:%s",
-				  t->name,
-				  t->devname);
-			litest_assert_ptr_notnull(tname);
-			n = zalloc(sizeof(*n));
-			n->name = tname;
-			list_insert(&testnames, &n->node);
-
-			tc = tcase_create(tname);
-			tcase_add_checked_fixture(tc,
-						  t->setup,
-						  t->teardown);
-			if (t->range.upper != t->range.lower)
-				tcase_add_loop_test(tc,
-						    t->func,
-						    t->range.lower,
-						    t->range.upper);
-			else
-				tcase_add_test(tc, t->func);
-
-			suite = suite_create(sname);
-			suite_add_tcase(suite, tc);
-
-			if (!sr)
-				sr = srunner_create(suite);
-			else
-				srunner_add_suite(sr, suite);
-		}
-	}
-
-	if (!sr)
-		goto out;
-
-	srunner_run_all(sr, CK_ENV);
-	if (xml_prefix)
-		litest_export_xml(sr, xml_prefix);
-
-
-	failed = srunner_ntests_failed(sr);
-	if (failed) {
-		TestResult **trs;
-
-		trs = srunner_failures(sr);
-		for (int i = 0; i < failed; i++) {
-			char tname[256];
-			char *c = tname;
-
-			/* tr_tcname is in the form "suite:testcase", let's
-			 * convert this to "suite(testcase)" to make
-			 * double-click selection in the terminal a bit
-			 * easier. */
-			snprintf(tname, sizeof(tname), "%s)", tr_tcname(trs[i]));
-			if ((c = index(c, ':')))
-				*c = '(';
-
-			dprintf(error_fd,
-				":: Failure: %s:%d: %s\n",
-				tr_lfile(trs[i]),
-				tr_lno(trs[i]),
-				tname);
-		}
-		free(trs);
-	}
-	srunner_free(sr);
-out:
-	list_for_each_safe(n, &testnames, node) {
-		free(n->name);
-		free(n);
-	}
-
+static void
+teardown_quirks(void *userdata)
+{
 	quirks_context_unref(quirks_context);
-
-	return failed;
 }
 
 static int
-litest_fork_subtests(struct list *tests, int max_forks)
+litest_run_suite(struct list *suites, int njobs)
 {
-	int failed = 0;
-	int status;
-	pid_t pid;
-	int f;
-	int pipes[max_forks];
+	size_t ntests = 0;
+	enum litest_runner_result result = LITEST_SKIP;
+	struct suite *s;
+	struct litest_runner *runner = litest_runner_new();
 
-	for (f = 0; f < max_forks; f++) {
-		int rc;
-		int pipefd[2];
+	litest_runner_set_num_parallel(runner, jobs > 0 ? jobs : 0);
+	if (outfile)
+		litest_runner_set_output_file(runner, outfile);
+	litest_runner_set_verbose(runner, verbose);
+	litest_runner_set_use_colors(runner, use_colors);
+	litest_runner_set_timeout(runner, 30);
+	litest_runner_set_exit_on_fail(runner, exit_first);
+	litest_runner_set_setup_funcs(runner, init_quirks, teardown_quirks, NULL);
 
-		rc = pipe2(pipefd, O_NONBLOCK);
-		assert(rc != -1);
+	list_for_each(s, suites, node) {
+		struct test *t;
+		list_for_each(t, &s->tests, node) {
+			struct litest_runner_test_description tdesc = {0};
 
-		pid = fork();
-		if (pid == 0) {
-			close(pipefd[0]);
-			failed = litest_run_suite(tests,
-						  f,
-						  max_forks,
-						  pipefd[1]);
+			if (range_is_valid(&t->range)) {
+				snprintf(tdesc.name, sizeof(tdesc.name),
+					  "%s:%s:%s:%d",
+					  s->name,
+					  t->name,
+					  t->devname,
+					  t->rangeval);
+			} else if (t->params) {
+				char buf[256] = {0};
 
-			litest_free_test_list(&all_tests);
-			exit(failed);
-			/* child always exits here */
-		} else {
-			pipes[f] = pipefd[0];
-			close(pipefd[1]);
+				struct litest_test_param *tp;
+				bool is_first = true;
+				list_for_each(tp, &t->params->test_params, link) {
+					char *val = multivalue_as_str(&tp->value);
+					snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
+						 "%s%s:%s", is_first ? "" : ",", tp->name, val);
+					free(val);
+					is_first = false;
+				}
+				snprintf(tdesc.name, sizeof(tdesc.name),
+					  "%s:%s:%s:%s",
+					  s->name,
+					  t->name,
+					  t->devname,
+					  buf);
+			} else {
+				snprintf(tdesc.name, sizeof(tdesc.name),
+					  "%s:%s:%s",
+					  s->name,
+					  t->name,
+					  t->devname);
+			}
+			tdesc.func = t->func;
+			tdesc.setup = t->setup;
+			tdesc.teardown = t->teardown;
+			tdesc.args.range = t->range;
+			tdesc.rangeval = t->rangeval;
+			tdesc.params = t->params;
+			litest_runner_add_test(runner, &tdesc);
+			ntests++;
 		}
 	}
 
-	/* parent process only */
-	while (wait(&status) != -1 && errno != ECHILD) {
-		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-			failed = 1;
-	}
+	if (ntests > 0)
+		result = litest_runner_run_tests(runner);
 
-	for (f = 0; f < max_forks; f++) {
-		char buf[1024] = {0};
-		int rc;
+	litest_runner_destroy(runner);
 
-		while ((rc = read(pipes[f], buf, sizeof(buf) - 1)) > 0) {
-			buf[rc] = '\0';
-			fprintf(stderr, "%s", buf);
-		}
-
-		close(pipes[f]);
-	}
-
-	return failed;
+	return result;
 }
 
 static inline int
@@ -1229,22 +1644,60 @@ out:
 	return lock_fd;
 }
 
-static inline int
-litest_run(int argc, char **argv)
+static int
+disable_tty(void)
 {
-	int failed = 0;
-	int inhibit_lock_fd;
+	int tty_mode = -1;
 
-	list_init(&created_files_list);
+	if (isatty(STDIN_FILENO) && ioctl(STDIN_FILENO, KDGKBMODE, &tty_mode) == 0) {
+#ifdef __linux__
+		ioctl(STDIN_FILENO, KDSKBMODE, K_OFF);
+#elif __FreeBSD__
+		ioctl(STDIN_FILENO, KDSKBMODE, K_RAW);
 
-	if (list_empty(&all_tests)) {
-		fprintf(stderr,
-			"Error: filters are too strict, no tests to run.\n");
-		return 1;
+		/* Put the tty into raw mode */
+		struct termios tios;
+		if (tcgetattr(STDIN_FILENO, &tios))
+				fprintf(stderr, "Failed to get terminal attribute: %d - %s\n", errno, strerror(errno));
+		cfmakeraw(&tios);
+		if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &tios))
+				fprintf(stderr, "Failed to set terminal attribute: %d - %s\n", errno, strerror(errno));
+#endif
 	}
 
-	if (getenv("LITEST_VERBOSE"))
-		verbose = true;
+	return tty_mode;
+}
+
+static void
+restore_tty(int tty_mode)
+{
+	if (tty_mode != -1) {
+		ioctl(STDIN_FILENO, KDSKBMODE, tty_mode);
+#ifdef __FreeBSD__
+		/* Put the tty into "sane" mode */
+		struct termios tios;
+		if (tcgetattr(STDIN_FILENO, &tios))
+				fprintf(stderr, "Failed to get terminal attribute: %d - %s\n", errno, strerror(errno));
+		cfmakesane(&tios);
+		if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &tios))
+				fprintf(stderr, "Failed to set terminal attribute: %d - %s\n", errno, strerror(errno));
+#endif
+	}
+}
+
+static inline enum litest_runner_result
+litest_run(struct list *suites)
+{
+	const struct rlimit corelimit = { 0, 0 };
+	int inhibit_lock_fd;
+	int tty_mode = -1;
+
+	setenv("LIBINPUT_RUNNING_TEST_SUITE", "1", 1);
+
+	if (setrlimit(RLIMIT_CORE, &corelimit) != 0)
+		perror("WARNING: Core dumps not disabled");
+
+	struct list created_files_list = LIST_INIT(created_files_list);
 
 	if (run_deviceless) {
 		litest_setup_quirks(&created_files_list,
@@ -1253,29 +1706,30 @@ litest_run(int argc, char **argv)
 		enum quirks_setup_mode mode;
 		litest_init_udev_rules(&created_files_list);
 
-
 		mode = use_system_rules_quirks ?
 				QUIRKS_SETUP_ONLY_DEVICE :
 				QUIRKS_SETUP_FULL;
 		litest_setup_quirks(&created_files_list, mode);
 	}
 
-	litest_setup_sighandler(SIGINT);
+	/* If we're running 'normally' on the VT, disable the keyboard to
+	 * avoid messing up our host. But if we're inside gdb or running
+	 * without forking, leave it as-is.
+	 */
+	if (!run_deviceless && jobs > 1 && !in_debugger)
+		tty_mode = disable_tty();
 
 	inhibit_lock_fd = inhibit();
 
-	if (jobs == 1)
-		failed = litest_run_suite(&all_tests, 1, 1, STDERR_FILENO);
-	else
-		failed = litest_fork_subtests(&all_tests, jobs);
+	enum litest_runner_result result = litest_run_suite(suites, jobs);
 
 	close(inhibit_lock_fd);
 
-	litest_free_test_list(&all_tests);
+	restore_tty(tty_mode);
 
 	litest_remove_udev_rules(&created_files_list);
 
-	return failed;
+	return result;
 }
 
 static struct input_absinfo *
@@ -1367,10 +1821,10 @@ litest_copy_file(const char *dest, const char *src, const char *header, bool is_
 		out = open(file->path, O_CREAT|O_WRONLY, 0644);
 	}
 	if (out == -1)
-		litest_abort_msg("Failed to write to file %s (%s)\n",
+		litest_abort_msg("Failed to write to file %s (%s)",
 				 file->path,
 				 strerror(errno));
-	litest_assert_int_ne(chmod(file->path, 0644), -1);
+	litest_assert_errno_success(chmod(file->path, 0644));
 
 	if (header) {
 		length = strlen(header);
@@ -1380,7 +1834,7 @@ litest_copy_file(const char *dest, const char *src, const char *header, bool is_
 	if (is_file) {
 		in = open(src, O_RDONLY);
 		if (in == -1)
-			litest_abort_msg("Failed to open file %s (%s)\n",
+			litest_abort_msg("Failed to open file %s (%s)",
 					 src,
 					 strerror(errno));
 		/* lazy, just check for error and empty file copy */
@@ -1453,7 +1907,7 @@ litest_init_device_quirk_file(const char *data_dir,
 		 ++count,
 		 dev->shortname);
 	fd = open(path, O_CREAT|O_WRONLY, 0644);
-	litest_assert_int_ne(fd, -1);
+	litest_assert_errno_success(fd);
 	f = fdopen(fd, "w");
 	litest_assert_notnull(f);
 	litest_assert_int_ge(fputs(dev->quirk_file, f), 0);
@@ -1538,7 +1992,7 @@ litest_setup_quirks(struct list *created_files_list,
 		break;
 	case QUIRKS_SETUP_FULL:
 		litest_assert_notnull(mkdtemp(tmpdir));
-		litest_assert_int_ne(chmod(tmpdir, 0755), -1);
+		litest_assert_errno_success(chmod(tmpdir, 0755));
 		file = zalloc(sizeof *file);
 		file->path = safe_strdup(tmpdir);
 		dirname = tmpdir;
@@ -1571,11 +2025,8 @@ litest_remove_udev_rules(struct list *created_files_list)
 	reload_udev = !list_empty(created_files_list);
 
 	list_for_each_safe(f, created_files_list, link) {
-		list_remove(&f->link);
-		unlink(f->path);
-		rmdir(f->path);
-		free(f->path);
-		free(f);
+		created_file_unlink(f);
+		created_file_destroy(f);
 	}
 
 	if (reload_udev)
@@ -1611,7 +2062,7 @@ litest_create(enum litest_device_type which,
 	}
 
 	if (!found)
-		ck_abort_msg("Invalid device type %d\n", which);
+		litest_abort_msg("Invalid device type %d", which);
 
 	d = zalloc(sizeof(*d));
 	d->which = which;
@@ -1654,7 +2105,7 @@ litest_create(enum litest_device_type which,
 	path = libevdev_uinput_get_devnode(d->uinput);
 	litest_assert_ptr_notnull(path);
 	fd = open(path, O_RDWR|O_NONBLOCK);
-	litest_assert_int_ne(fd, -1);
+	litest_assert_errno_success(fd);
 
 	rc = libevdev_new_from_fd(fd, &d->evdev);
 	litest_assert_neg_errno_success(rc);
@@ -1687,7 +2138,6 @@ litest_destroy_context(struct libinput *li)
 {
 	struct path *p;
 	struct litest_context *ctx;
-
 
 	ctx = libinput_get_user_data(li);
 	litest_assert_ptr_notnull(ctx);
@@ -1725,7 +2175,7 @@ litest_bug_log_handler(struct libinput *libinput,
 	    strstr(format, "kernel bug: "))
 		return;
 
-	litest_abort_msg("Expected bug statement in log msg, aborting.\n");
+	litest_abort_msg("Expected bug statement in log msg, aborting.");
 }
 
 void
@@ -1837,10 +2287,9 @@ udev_setup_monitor(void)
 	udev_monitor_filter_add_match_subsystem_devtype(udev_monitor, "input",
 							NULL);
 
-
 	/* remove O_NONBLOCK */
 	rc = fcntl(udev_monitor_get_fd(udev_monitor), F_SETFL, 0);
-	litest_assert_int_ne(rc, -1);
+	litest_assert_errno_success(rc);
 	litest_assert_int_eq(udev_monitor_enable_receiving(udev_monitor),
 			     0);
 	udev_unref(udev);
@@ -1869,7 +2318,7 @@ udev_wait_for_device_event(struct udev_monitor *udev_monitor,
 		}
 
 		udev_syspath = udev_device_get_syspath(udev_device);
-		if (udev_syspath && strstartswith(udev_syspath, syspath))
+		if (strstartswith(udev_syspath, syspath))
 			break;
 
 		udev_device_unref(udev_device);
@@ -2009,7 +2458,7 @@ litest_auto_assign_value(struct litest_device *d,
 								   ev->code,
 								   &value);
 			if (error) {
-				litest_abort_msg("Failed to get default axis value for %s (%d)\n",
+				litest_abort_msg("Failed to get default axis value for %s (%d)",
 						 libevdev_event_code_get_name(EV_ABS, ev->code),
 						 ev->code);
 			}
@@ -2397,7 +2846,7 @@ auto_assign_tablet_value(struct litest_device *d,
 		    d->interface->get_axis_default) {
 			int error = d->interface->get_axis_default(d, ev->code, &value);
 			if (error) {
-				litest_abort_msg("Failed to get default axis value for %s (%d)\n",
+				litest_abort_msg("Failed to get default axis value for %s (%d)",
 						 libevdev_event_code_get_name(EV_ABS, ev->code),
 						 ev->code);
 			}
@@ -2991,7 +3440,10 @@ litest_wait_for_event(struct libinput *li)
 }
 
 void
-litest_wait_for_event_of_type(struct libinput *li, ...)
+_litest_wait_for_event_of_type(struct libinput *li,
+			       const char *func,
+			       int lineno,
+			       ...)
 {
 	va_list args;
 	enum libinput_event_type types[32] = {LIBINPUT_EVENT_NONE};
@@ -2999,7 +3451,7 @@ litest_wait_for_event_of_type(struct libinput *li, ...)
 	enum libinput_event_type type;
 	struct pollfd fds;
 
-	va_start(args, li);
+	va_start(args, lineno);
 	type = va_arg(args, int);
 	while ((int)type != -1) {
 		litest_assert_int_gt(type, 0U);
@@ -3034,6 +3486,9 @@ litest_wait_for_event_of_type(struct libinput *li, ...)
 		}
 
 		event = libinput_get_event(li);
+		if (verbose) {
+			litest_print_event(event, "Discarding event while waiting: ");
+		}
 		libinput_event_destroy(event);
 	}
 }
@@ -3046,17 +3501,15 @@ litest_drain_events(struct libinput *li)
 	libinput_dispatch(li);
 	while ((event = libinput_get_event(li))) {
 		if (verbose) {
-			fprintf(stderr, "litest: draining event: ");
-			litest_print_event(event);
+			litest_print_event(event, "litest: draining event: ");
 		}
 		libinput_event_destroy(event);
 		libinput_dispatch(li);
 	}
 }
 
-
 void
-litest_drain_events_of_type(struct libinput *li, ...)
+_litest_drain_events_of_type(struct libinput *li, ...)
 {
 	enum libinput_event_type type;
 	enum libinput_event_type types[32] = {LIBINPUT_EVENT_NONE};
@@ -3075,7 +3528,7 @@ litest_drain_events_of_type(struct libinput *li, ...)
 
 	libinput_dispatch(li);
 	type = libinput_next_event_type(li);
-	while (type !=  LIBINPUT_EVENT_NONE) {
+	while (type != LIBINPUT_EVENT_NONE) {
 		struct libinput_event *event;
 		bool found = false;
 
@@ -3096,7 +3549,7 @@ litest_drain_events_of_type(struct libinput *li, ...)
 	}
 }
 
-static const char *
+const char *
 litest_event_type_str(enum libinput_event_type type)
 {
 	const char *str = NULL;
@@ -3214,118 +3667,25 @@ litest_event_get_type_str(struct libinput_event *event)
 }
 
 static void
-litest_print_event(struct libinput_event *event)
+litest_print_event(struct libinput_event *event, const char *message)
 {
-	struct libinput_event_pointer *p;
-	struct libinput_event_tablet_tool *t;
-	struct libinput_event_tablet_pad *pad;
-	struct libinput_device *dev;
-	enum libinput_event_type type;
-	double x, y;
-
-	dev = libinput_event_get_device(event);
-	type = libinput_event_get_type(event);
-
-	fprintf(stderr,
-		"device %s (%s) type %s ",
-		libinput_device_get_sysname(dev),
-		libinput_device_get_name(dev),
-		litest_event_get_type_str(event));
-	switch (type) {
-	case LIBINPUT_EVENT_POINTER_MOTION:
-		p = libinput_event_get_pointer_event(event);
-		x = libinput_event_pointer_get_dx(p);
-		y = libinput_event_pointer_get_dy(p);
-		fprintf(stderr, "%.2f/%.2f", x, y);
-		break;
-	case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
-		p = libinput_event_get_pointer_event(event);
-		x = libinput_event_pointer_get_absolute_x(p);
-		y = libinput_event_pointer_get_absolute_y(p);
-		fprintf(stderr, "%.2f/%.2f", x, y);
-		break;
-	case LIBINPUT_EVENT_POINTER_BUTTON:
-		p = libinput_event_get_pointer_event(event);
-		fprintf(stderr,
-			"button %d state %d",
-			libinput_event_pointer_get_button(p),
-			libinput_event_pointer_get_button_state(p));
-		break;
-	case LIBINPUT_EVENT_POINTER_AXIS:
-		p = libinput_event_get_pointer_event(event);
-		x = 0.0;
-		y = 0.0;
-		if (libinput_event_pointer_has_axis(p,
-				LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL))
-			y = libinput_event_pointer_get_axis_value(p,
-				LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
-		if (libinput_event_pointer_has_axis(p,
-				LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL))
-			x = libinput_event_pointer_get_axis_value(p,
-				LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
-		fprintf(stderr, "vert %.2f horiz %.2f", y, x);
-		break;
-	case LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY:
-		t = libinput_event_get_tablet_tool_event(event);
-		fprintf(stderr, "proximity %d",
-			libinput_event_tablet_tool_get_proximity_state(t));
-		break;
-	case LIBINPUT_EVENT_TABLET_TOOL_TIP:
-		t = libinput_event_get_tablet_tool_event(event);
-		fprintf(stderr, "tip %d",
-			libinput_event_tablet_tool_get_tip_state(t));
-		break;
-	case LIBINPUT_EVENT_TABLET_TOOL_BUTTON:
-		t = libinput_event_get_tablet_tool_event(event);
-		fprintf(stderr, "button %d state %d",
-			libinput_event_tablet_tool_get_button(t),
-			libinput_event_tablet_tool_get_button_state(t));
-		break;
-	case LIBINPUT_EVENT_TABLET_PAD_BUTTON:
-		pad = libinput_event_get_tablet_pad_event(event);
-		fprintf(stderr, "button %d state %d",
-			libinput_event_tablet_pad_get_button_number(pad),
-			libinput_event_tablet_pad_get_button_state(pad));
-		break;
-	case LIBINPUT_EVENT_TABLET_PAD_RING:
-		pad = libinput_event_get_tablet_pad_event(event);
-		fprintf(stderr, "ring %d position %.2f source %d",
-			libinput_event_tablet_pad_get_ring_number(pad),
-			libinput_event_tablet_pad_get_ring_position(pad),
-			libinput_event_tablet_pad_get_ring_source(pad));
-		break;
-	case LIBINPUT_EVENT_TABLET_PAD_STRIP:
-		pad = libinput_event_get_tablet_pad_event(event);
-		fprintf(stderr, "strip %d position %.2f source %d",
-			libinput_event_tablet_pad_get_ring_number(pad),
-			libinput_event_tablet_pad_get_ring_position(pad),
-			libinput_event_tablet_pad_get_ring_source(pad));
-		break;
-	case LIBINPUT_EVENT_TABLET_PAD_DIAL:
-		pad = libinput_event_get_tablet_pad_event(event);
-		fprintf(stderr, "dial %d delta %.2f",
-			libinput_event_tablet_pad_get_dial_number(pad),
-			libinput_event_tablet_pad_get_dial_delta_v120(pad));
-		break;
-	default:
-		break;
-	}
-
-	fprintf(stderr, "\n");
+	char *event_str = libinput_event_to_str(event, 0, NULL);
+	fprintf(stderr, "litest: %s %s\n", message, event_str);
+	free(event_str);
 }
 
-#define litest_assert_event_type_is_one_of(...) \
-    _litest_assert_event_type_is_one_of(__VA_ARGS__, -1)
-
-static void
-_litest_assert_event_type_is_one_of(struct libinput_event *event, ...)
+void
+_litest_assert_event_type_is_one_of(struct libinput_event *event,
+				    const char *func,
+				    int lineno,
+				    ...)
 {
 	va_list args;
 	enum libinput_event_type expected_type;
 	enum libinput_event_type actual_type = libinput_event_get_type(event);
 	bool match = false;
 
-	va_start(args, event);
+	va_start(args, lineno);
 	expected_type = va_arg(args, int);
 	while ((int)expected_type != -1 && !match) {
 		match = (actual_type == expected_type);
@@ -3342,7 +3702,7 @@ _litest_assert_event_type_is_one_of(struct libinput_event *event, ...)
 		litest_event_get_type_str(event),
 		libinput_event_get_type(event));
 
-	va_start(args, event);
+	va_start(args, lineno);
 	expected_type = va_arg(args, int);
 	while ((int)expected_type != -1) {
 		fprintf(stderr,
@@ -3354,32 +3714,70 @@ _litest_assert_event_type_is_one_of(struct libinput_event *event, ...)
 		if ((int)expected_type != -1)
 			fprintf(stderr, " || ");
 	}
+	va_end(args);
+	fprintf(stderr, "\n");
 
-	fprintf(stderr, "\nWrong event is: ");
-	litest_print_event(event);
-	litest_backtrace();
-	abort();
+	litest_print_event(event, "Wrong event is:");
+	litest_backtrace(func);
+	litest_runner_abort();
 }
 
 void
-litest_assert_event_type(struct libinput_event *event,
-			 enum libinput_event_type want)
+_litest_assert_event_type(struct libinput_event *event,
+			  enum libinput_event_type want,
+			  const char *func,
+			  int lineno)
 {
-	litest_assert_event_type_is_one_of(event, want);
+	_litest_assert_event_type_is_one_of(event, func, lineno, want, -1);
 }
 
 void
-litest_assert_empty_queue(struct libinput *li)
+_litest_assert_event_type_not_one_of(struct libinput_event *event,
+				     const char *func,
+				     int lineno,
+				     ...)
+{
+	va_list args;
+	enum libinput_event_type not_expected_type;
+	enum libinput_event_type actual_type = libinput_event_get_type(event);
+	bool match = false;
+
+	va_start(args, lineno);
+	not_expected_type = va_arg(args, int);
+	while ((int)not_expected_type != -1 && !match) {
+		match = (actual_type == not_expected_type);
+		not_expected_type = va_arg(args, int);
+	}
+	va_end(args);
+
+	if (!match)
+		return;
+
+	fprintf(stderr,
+		"FAILED EVENT TYPE: %s: have %s (%d) but didn't want that\n",
+		libinput_device_get_name(libinput_event_get_device(event)),
+		litest_event_get_type_str(event),
+		libinput_event_get_type(event));
+
+	litest_print_event(event,"\nWrong event is: ");
+	litest_backtrace(func);
+	litest_runner_abort();
+}
+
+void
+_litest_assert_empty_queue(struct libinput *li,
+			   const char *func,
+			   int line)
 {
 	bool empty_queue = true;
 	struct libinput_event *event;
 
+	_litest_checkpoint(func, line, ANSI_BRIGHT_CYAN, "asserting empty queue");
+
 	libinput_dispatch(li);
 	while ((event = libinput_get_event(li))) {
 		empty_queue = false;
-		fprintf(stderr,
-			"Unexpected event: ");
-		litest_print_event(event);
+		litest_print_event(event, "Unexpected event: ");
 		libinput_event_destroy(event);
 		libinput_dispatch(li);
 	}
@@ -3402,6 +3800,15 @@ litest_create_uinput(const char *name,
 		.value = 0,
 		.minimum = 0,
 		.maximum = 100,
+		.fuzz = 0,
+		.flat = 0,
+		.resolution = 100
+	};
+	/* See kernel commit 206f533a0a7c ("Input: uinput - reject requests with unreasonable number of slots") */
+	const struct input_absinfo default_abs_mt_slot = {
+		.value = 0,
+		.minimum = 0,
+		.maximum = 64,
 		.fuzz = 0,
 		.flat = 0,
 		.resolution = 100
@@ -3438,8 +3845,10 @@ litest_create_uinput(const char *name,
 		if (type == INPUT_PROP_MAX) {
 			rc = libevdev_enable_property(dev, code);
 		} else {
+			const struct input_absinfo *abs =
+				(code == ABS_MT_SLOT) ? &default_abs_mt_slot : &default_abs;
 			rc = libevdev_enable_event_code(dev, type, code,
-							type == EV_ABS ? &default_abs : NULL);
+							type == EV_ABS ? abs : NULL);
 		}
 		litest_assert_int_eq(rc, 0);
 	}
@@ -3618,8 +4027,11 @@ litest_is_motion_event(struct libinput_event *event)
 }
 
 void
-litest_assert_key_event(struct libinput *li, unsigned int key,
-			enum libinput_key_state state)
+_litest_assert_key_event(struct libinput *li,
+			 unsigned int key,
+			 enum libinput_key_state state,
+			 const char *func,
+			 int lineno)
 {
 	struct libinput_event *event;
 
@@ -3632,10 +4044,19 @@ litest_assert_key_event(struct libinput *li, unsigned int key,
 }
 
 void
-litest_assert_button_event(struct libinput *li, unsigned int button,
-			   enum libinput_button_state state)
+_litest_assert_button_event(struct libinput *li, unsigned int button,
+			    enum libinput_button_state state,
+			    const char *func, int line)
 {
 	struct libinput_event *event;
+
+	_litest_checkpoint(func,
+			   line,
+			   ANSI_CYAN,
+			   "asserting button event %s (%d) state %d",
+			   libevdev_event_code_get_name(EV_KEY, button),
+			   button,
+			   state);
 
 	litest_wait_for_event(li);
 	event = libinput_get_event(li);
@@ -3665,7 +4086,7 @@ litest_is_touch_event(struct libinput_event *event,
 		litest_assert_event_type(event, type);
 		break;
 	default:
-		ck_abort_msg("%s: invalid touch type %d\n", __func__, type);
+		litest_abort_msg("%s: invalid touch type %d", __func__, type);
 	}
 
 	touch = libinput_event_get_touch_event(event);
@@ -3713,11 +4134,20 @@ litest_is_gesture_event(struct libinput_event *event,
 }
 
 void
-litest_assert_gesture_event(struct libinput *li,
-			    enum libinput_event_type type,
-			    int nfingers)
+_litest_assert_gesture_event(struct libinput *li,
+			     enum libinput_event_type type,
+			     int nfingers,
+			     const char *func,
+			     int line)
 {
 	struct libinput_event *event;
+
+	_litest_checkpoint(func,
+			   line,
+			   ANSI_CYAN,
+			   "asserting gesture event %s %dfg",
+			   litest_event_type_str(type),
+			   nfingers);
 
 	litest_wait_for_event(li);
 	event = libinput_get_event(li);
@@ -3742,8 +4172,10 @@ litest_is_tablet_event(struct libinput_event *event,
 }
 
 void
-litest_assert_tablet_button_event(struct libinput *li, unsigned int button,
-				  enum libinput_button_state state)
+_litest_assert_tablet_button_event(struct libinput *li, unsigned int button,
+				   enum libinput_button_state state,
+				   const char *func,
+				   int lineno)
 {
 	struct libinput_event *event;
 	struct libinput_event_tablet_tool *tev;
@@ -3761,7 +4193,6 @@ litest_assert_tablet_button_event(struct libinput *li, unsigned int button,
 			     state);
 	libinput_event_destroy(event);
 }
-
 
 struct libinput_event_tablet_tool *
 litest_is_proximity_event(struct libinput_event *event,
@@ -3825,8 +4256,11 @@ litest_event_pointer_get_axis_source(struct libinput_event_pointer *ptrev)
 	}
 }
 
-void litest_assert_tablet_proximity_event(struct libinput *li,
-					  enum libinput_tablet_tool_proximity_state state)
+void
+_litest_assert_tablet_proximity_event(struct libinput *li,
+				      enum libinput_tablet_tool_proximity_state state,
+				      const char *func,
+				      int lineno)
 {
 	struct libinput_event *event;
 
@@ -3836,8 +4270,11 @@ void litest_assert_tablet_proximity_event(struct libinput *li,
 	libinput_event_destroy(event);
 }
 
-void litest_assert_tablet_tip_event(struct libinput *li,
-				    enum libinput_tablet_tool_tip_state state)
+void
+_litest_assert_tablet_tip_event(struct libinput *li,
+				enum libinput_tablet_tool_tip_state state,
+				const char *func,
+				int lineno)
 {
 	struct libinput_event *event;
 	struct libinput_event_tablet_tool *tev;
@@ -3974,9 +4411,11 @@ litest_is_switch_event(struct libinput_event *event,
 }
 
 void
-litest_assert_switch_event(struct libinput *li,
-			   enum libinput_switch sw,
-			   enum libinput_switch_state state)
+_litest_assert_switch_event(struct libinput *li,
+			    enum libinput_switch sw,
+			    enum libinput_switch_state state,
+			    const char *func,
+			    int lineno)
 {
 	struct libinput_event *event;
 
@@ -3989,9 +4428,11 @@ litest_assert_switch_event(struct libinput *li,
 }
 
 void
-litest_assert_pad_button_event(struct libinput *li,
-			       unsigned int button,
-			       enum libinput_button_state state)
+_litest_assert_pad_button_event(struct libinput *li,
+				unsigned int button,
+				enum libinput_button_state state,
+				const char *func,
+				int lineno)
 {
 	struct libinput_event *event;
 
@@ -4003,9 +4444,11 @@ litest_assert_pad_button_event(struct libinput *li,
 }
 
 void
-litest_assert_pad_key_event(struct libinput *li,
-			    unsigned int key,
-			    enum libinput_key_state state)
+_litest_assert_pad_key_event(struct libinput *li,
+			     unsigned int key,
+			     enum libinput_key_state state,
+			     const char *func,
+			     int lineno)
 {
 	struct libinput_event *event;
 
@@ -4106,7 +4549,7 @@ litest_assert_axis_end_sequence(struct libinput *li,
 		event = libinput_get_event(li);
 		ptrev = litest_is_axis_event(event, axis_type, axis, source);
 		val = litest_event_pointer_get_value(ptrev, axis);
-		ck_assert(val == 0.0);
+		litest_assert(val == 0.0);
 
 		if (litest_is_high_res_axis_event(event)) {
 			litest_assert(!last_hi_res_event_found);
@@ -4124,12 +4567,20 @@ litest_assert_axis_end_sequence(struct libinput *li,
 }
 
 void
-litest_assert_only_typed_events(struct libinput *li,
-				enum libinput_event_type type)
+_litest_assert_only_typed_events(struct libinput *li,
+				 enum libinput_event_type type,
+				 const char *func,
+				 int line)
 {
 	struct libinput_event *event;
 
 	litest_assert(type != LIBINPUT_EVENT_NONE);
+
+	_litest_checkpoint(func,
+			   line,
+			   ANSI_CYAN,
+			   "asserting only typed events %s",
+			   litest_event_type_str(type));
 
 	libinput_dispatch(li);
 	event = libinput_get_event(li);
@@ -4409,6 +4860,12 @@ litest_timeout_hysteresis(void)
 }
 
 void
+litest_timeout_3fg_drag(void)
+{
+	msleep(800);
+}
+
+void
 litest_push_event_frame(struct litest_device *dev)
 {
 	litest_assert_int_ge(dev->skip_ev_syn, 0);
@@ -4595,11 +5052,14 @@ static inline enum litest_mode
 litest_parse_argv(int argc, char **argv)
 {
 	enum {
+		OPT_EXIT_FIRST,
 		OPT_FILTER_TEST,
 		OPT_FILTER_DEVICE,
 		OPT_FILTER_GROUP,
+		OPT_FILTER_RANGEVAL,
 		OPT_FILTER_DEVICELESS,
-		OPT_XML_PREFIX,
+		OPT_FILTER_PARAMETER,
+		OPT_OUTPUT_FILE,
 		OPT_JOBS,
 		OPT_LIST,
 		OPT_VERBOSE,
@@ -4608,8 +5068,11 @@ litest_parse_argv(int argc, char **argv)
 		{ "filter-test", 1, 0, OPT_FILTER_TEST },
 		{ "filter-device", 1, 0, OPT_FILTER_DEVICE },
 		{ "filter-group", 1, 0, OPT_FILTER_GROUP },
+		{ "filter-rangeval", 1, 0, OPT_FILTER_RANGEVAL },
 		{ "filter-deviceless", 0, 0, OPT_FILTER_DEVICELESS },
-		{ "xml-output", 1, 0, OPT_XML_PREFIX },
+		{ "filter-parameter", 1, 0, OPT_FILTER_PARAMETER },
+		{ "output-file", 1, 0, OPT_OUTPUT_FILE },
+		{ "exitfirst", 0, 0, OPT_EXIT_FIRST },
 		{ "jobs", 1, 0, OPT_JOBS },
 		{ "list", 0, 0, OPT_LIST },
 		{ "verbose", 0, 0, OPT_VERBOSE },
@@ -4645,7 +5108,7 @@ litest_parse_argv(int argc, char **argv)
 		int c;
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "j:", opts, &option_index);
+		c = getopt_long(argc, argv, "j:x", opts, &option_index);
 		if (c == -1)
 			break;
 		switch(c) {
@@ -4654,18 +5117,21 @@ litest_parse_argv(int argc, char **argv)
 			printf("Usage: %s [--verbose] [--jobs] [--filter-...]\n"
 			       "\n"
 			       "Options:\n"
+			       "    -x | --exitfirst\n"
+			       "          Exit instantly on first failed test\n"
 			       "    --filter-test=.... \n"
 			       "          Glob to filter on test names\n"
 			       "    --filter-device=.... \n"
 			       "          Glob to filter on device names\n"
 			       "    --filter-group=.... \n"
 			       "          Glob to filter on test groups\n"
+			       "    --filter-rangeval=N \n"
+			       "          Only run tests with the given range value\n"
 			       "    --filter-deviceless=.... \n"
 			       "          Glob to filter on tests that do not create test devices\n"
-			       "    --xml-output=/path/to/file-XXXXXXX.xml\n"
-			       "          Write test output in libcheck's XML format\n"
-			       "          to the given files. The file must match the format\n"
-			       "          prefix-XXXXXX.xml and only the prefix is your choice.\n"
+			       "    --filter-parameter=param1:glob,param2:glob,... \n"
+			       "          Glob(s) to filter on the given parameters in their string representation.\n"
+			       "          Boolean parameters are filtered via 'true' and 'false'.\n"
 			       "    --verbose\n"
 			       "          Enable verbose output\n"
 			       "    --jobs 8\n"
@@ -4688,12 +5154,40 @@ litest_parse_argv(int argc, char **argv)
 			if (want_jobs == JOBS_DEFAULT)
 				want_jobs = JOBS_SINGLE;
 			break;
+		case OPT_FILTER_DEVICELESS:
+			run_deviceless = true;
+			break;
 		case OPT_FILTER_GROUP:
 			filter_group = optarg;
 			break;
-		case OPT_XML_PREFIX:
-			xml_prefix = optarg;
+		case OPT_FILTER_RANGEVAL:
+			filter_rangeval = atoi(optarg);
 			break;
+		case OPT_FILTER_PARAMETER: {
+			size_t nelems;
+			char **params = strv_from_string(optarg, ",", &nelems);
+			const size_t max_filters = ARRAY_LENGTH(filter_params) - 1;
+			if (nelems >=  max_filters) {
+				fprintf(stderr, "Only %zd parameter filters are supported\n", max_filters);
+				exit(1);
+			}
+			for (size_t i = 0; i < nelems; i++)  {
+				size_t n;
+				char **strv = strv_from_string(params[i], ":", &n);
+				assert(n == 2);
+
+				const char *name = strv[0];
+				const char *glob = strv[1];
+
+				struct param_filter *f = &filter_params[i];
+				snprintf(f->name, sizeof(f->name), "%s", name);
+				snprintf(f->glob, sizeof(f->glob), "%s", glob);
+
+				strv_free(strv);
+			}
+			strv_free(params);
+			break;
+		}
 		case 'j':
 		case OPT_JOBS:
 			jobs = atoi(optarg);
@@ -4704,8 +5198,16 @@ litest_parse_argv(int argc, char **argv)
 		case OPT_VERBOSE:
 			verbose = true;
 			break;
-		case OPT_FILTER_DEVICELESS:
-			run_deviceless = true;
+		case OPT_OUTPUT_FILE:
+			outfile = fopen(optarg, "w+");
+			if (!outfile) {
+				fprintf(stderr, "Failed to open %s: %m\n", optarg);
+				exit(1);
+			}
+			break;
+		case 'x':
+		case OPT_EXIT_FIRST:
+			exit_first = true;
 			break;
 		}
 	}
@@ -4750,34 +5252,40 @@ static void
 litest_list_tests(struct list *tests)
 {
 	struct suite *s;
-	const char *last_test_name = NULL;
+	const char *last_test_name = "<invalid>";
+	const char *last_dev_name = "<invalid>";
 
+	printf("groups:\n");
 	list_for_each(s, tests, node) {
 		struct test *t;
-		printf("%s:\n", s->name);
+		printf("  - group: \"%s\"\n", s->name);
+		printf("    tests:\n");
 		list_for_each(t, &s->tests, node) {
-			if (!last_test_name ||
-			    !streq(last_test_name, t->name))
-				printf("	%s:\n", t->name);
+			bool same_test = streq(last_test_name, t->name);
+			bool same_dev = streq(last_dev_name, t->devname);
 
-			last_test_name = t->name;
+			if (!same_test) {
+				printf("      - name: \"%s\"\n", t->name);
+				printf("        devices:\n");
+			}
 
-			printf("		%s\n", t->devname);
+			if (!same_test || !same_dev) {
+				last_test_name = t->name;
+				last_dev_name = t->devname;
+				printf("          - name: \"%s\"\n", t->devname);
+			}
 		}
 	}
 }
 
-extern const struct test_device __start_test_section, __stop_test_section;
+extern const struct test_device __start_test_device_section, __stop_test_device_section;
 
 static void
-litest_init_test_devices(void)
+litest_init_test_devices(struct list *devices)
 {
 	const struct test_device *t;
-
-	list_init(&devices);
-
-	for (t = &__start_test_section; t < &__stop_test_section; t++)
-		list_append(&devices, &t->device->node);
+	for (t = &__start_test_device_section; t < &__stop_test_device_section; t++)
+		list_append(devices, &t->device->node);
 }
 
 extern const struct test_collection __start_test_collection_section,
@@ -4791,7 +5299,16 @@ setup_tests(void)
 	for (c = &__start_test_collection_section;
 	     c < &__stop_test_collection_section;
 	     c++) {
+		struct suite *s;
+		s = zalloc(sizeof(*s));
+		s->name = safe_strdup(c->name);
+
+		list_init(&s->tests);
+		list_append(&all_test_suites, &s->node);
+
+		current_suite = s;
 		c->setup();
+		current_suite = NULL;
 	}
 }
 
@@ -4815,98 +5332,84 @@ check_device_access(void)
 	return 0;
 }
 
-static int
-disable_tty(void)
+static void
+litest_free_test_list(struct list *tests)
 {
-	int tty_mode = -1;
+	struct suite *s;
 
-	/* If we're running 'normally' on the VT, disable the keyboard to
-	 * avoid messing up our host. But if we're inside gdb or running
-	 * without forking, leave it as-is.
-	 */
-	if (!run_deviceless &&
-	    jobs > 1 &&
-	    !in_debugger &&
-	    getenv("CK_FORK") == NULL &&
-	    isatty(STDIN_FILENO) &&
-	    ioctl(STDIN_FILENO, KDGKBMODE, &tty_mode) == 0) {
-#ifdef __linux__
-		ioctl(STDIN_FILENO, KDSKBMODE, K_OFF);
-#elif __FreeBSD__
-		ioctl(STDIN_FILENO, KDSKBMODE, K_RAW);
+	list_for_each_safe(s, tests, node) {
+		struct test *t;
 
-		/* Put the tty into raw mode */
-		struct termios tios;
-		if (tcgetattr(STDIN_FILENO, &tios))
-				fprintf(stderr, "Failed to get terminal attribute: %d - %s\n", errno, strerror(errno));
-		cfmakeraw(&tios);
-		if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &tios))
-				fprintf(stderr, "Failed to set terminal attribute: %d - %s\n", errno, strerror(errno));
-#endif
+		list_for_each_safe(t, &s->tests, node) {
+			litest_test_parameters_unref(t->params);
+			free(t->name);
+			free(t->devname);
+			list_remove(&t->node);
+			free(t);
+		}
+
+		list_remove(&s->node);
+		free(s->name);
+		free(s);
 	}
-
-	return tty_mode;
 }
 
 int
 main(int argc, char **argv)
 {
-	const struct rlimit corelimit = { 0, 0 };
 	enum litest_mode mode;
-	int tty_mode = -1;
-	int failed_tests;
 	int rc;
 	const char *meson_testthreads;
 
-	in_debugger = is_debugger_attached();
-	if (in_debugger || RUNNING_ON_VALGRIND)
-		setenv("CK_FORK", "no", 0);
+	use_colors = getenv("FORCE_COLOR") || isatty(STDERR_FILENO);
+	if (getenv("NO_COLOR"))
+		use_colors = false;
 
-	if ((meson_testthreads = getenv("MESON_TESTTHREADS")) == NULL ||
-	     !safe_atoi(meson_testthreads, &jobs)) {
+	in_debugger = is_debugger_attached();
+	if (in_debugger) {
+		jobs = 0;
+	} else if ((meson_testthreads = getenv("MESON_TESTTHREADS")) == NULL ||
+		   !safe_atoi(meson_testthreads, &jobs)) {
 		jobs = get_nprocs();
 		if (!RUNNING_ON_VALGRIND)
 			jobs *= 2;
 	}
 
+	if (getenv("LITEST_VERBOSE"))
+		verbose = true;
+
 	mode = litest_parse_argv(argc, argv);
 	if (mode == LITEST_MODE_ERROR)
 		return EXIT_FAILURE;
 
-	litest_init_test_devices();
-	list_init(&all_tests);
+	litest_init_test_devices(&devices);
+
 	setup_tests();
+	if (list_empty(&all_test_suites)) {
+		fprintf(stderr,
+			"Error: filters are too strict, no tests to run.\n");
+		return EXIT_FAILURE;
+	}
+
 	if (mode == LITEST_MODE_LIST) {
-		litest_list_tests(&all_tests);
+		litest_list_tests(&all_test_suites);
 		return EXIT_SUCCESS;
 	}
 
 	if (!run_deviceless && (rc = check_device_access()) != 0)
 		return rc;
 
-	setenv("CK_DEFAULT_TIMEOUT", "30", 0);
-	setenv("LIBINPUT_RUNNING_TEST_SUITE", "1", 1);
+	enum litest_runner_result result = litest_run(&all_test_suites);
 
-	if (setrlimit(RLIMIT_CORE, &corelimit) != 0)
-		perror("WARNING: Core dumps not disabled");
+	litest_free_test_list(&all_test_suites);
 
-	tty_mode = disable_tty();
-
-	failed_tests = litest_run(argc, argv);
-
-	if (tty_mode != -1) {
-		ioctl(STDIN_FILENO, KDSKBMODE, tty_mode);
-#ifdef __FreeBSD__
-		/* Put the tty into "sane" mode */
-		struct termios tios;
-		if (tcgetattr(STDIN_FILENO, &tios))
-				fprintf(stderr, "Failed to get terminal attribute: %d - %s\n", errno, strerror(errno));
-		cfmakesane(&tios);
-		if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &tios))
-				fprintf(stderr, "Failed to set terminal attribute: %d - %s\n", errno, strerror(errno));
-#endif
+	switch (result) {
+		case LITEST_PASS:
+			return EXIT_SUCCESS;
+		case LITEST_SKIP:
+			return 77;
+		default:
+			return result;
 	}
-
-	return min(failed_tests, 255);
 }
 #endif

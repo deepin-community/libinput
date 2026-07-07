@@ -141,7 +141,7 @@ struct match {
 	char *uniq;
 	enum bustype bus;
 	uint32_t vendor;
-	uint32_t product;
+	uint32_t product[64]; /* zero-terminated */
 	uint32_t version;
 
 	char *dmi;	/* dmi modalias with preceding "dmi:" */
@@ -531,10 +531,18 @@ section_destroy(struct section *s)
 static inline bool
 parse_hex(const char *value, unsigned int *parsed)
 {
-	return strneq(value, "0x", 2) &&
+	return strstartswith(value, "0x") &&
 	       safe_atou_base(value, parsed, 16) &&
 	       strspn(value, "0123456789xABCDEF") == strlen(value) &&
 	       *parsed <= 0xFFFF;
+}
+
+static int
+strv_parse_hex(const char *str, size_t index, void *data)
+{
+	unsigned int *product = data;
+
+	return !parse_hex(str, &product[index]); /* 0 for success */
 }
 
 /**
@@ -592,13 +600,18 @@ parse_match(struct quirks_context *ctx,
 
 		s->match.vendor = vendor;
 	} else if (streq(key, "MatchProduct")) {
-		unsigned int product;
+		unsigned int product[ARRAY_LENGTH(s->match.product)] = {0};
+		const size_t max = ARRAY_LENGTH(s->match.product) - 1;
 
-		check_set_bit(s, M_PID);
-		if (!parse_hex(value, &product))
+		size_t nelems = 0;
+		char **strs = strv_from_string(value, ";", &nelems);
+		int rc = strv_for_each_n((const char**)strs, max, strv_parse_hex, product);
+		strv_free(strs);
+		if (rc != 0)
 			goto out;
 
-		s->match.product = product;
+		check_set_bit(s, M_PID);
+		memcpy(s->match.product, product, sizeof(product));
 	} else if (streq(key, "MatchVersion")) {
 		unsigned int version;
 
@@ -609,7 +622,7 @@ parse_match(struct quirks_context *ctx,
 		s->match.version = version;
 	} else if (streq(key, "MatchDMIModalias")) {
 		check_set_bit(s, M_DMI);
-		if (!strneq(value, "dmi:", 4)) {
+		if (!strstartswith(value, "dmi:")) {
 			qlog_parser(ctx,
 				    "%s: MatchDMIModalias must start with 'dmi:'\n",
 				    s->name);
@@ -667,7 +680,7 @@ parse_model(struct quirks_context *ctx,
 	bool b;
 	enum quirk q = QUIRK_MODEL_ALPS_SERIAL_TOUCHPAD;
 
-	assert(strneq(key, "Model", 5));
+	assert(strstartswith(key, "Model"));
 
 	if (!parse_boolean_property(value, &b))
 		return false;
@@ -905,11 +918,11 @@ parse_value_line(struct quirks_context *ctx, struct section *s, const char *line
 	if (value[0] == '"' || value[0] == '\'')
 		goto out;
 
-	if (strneq(key, "Match", 5))
+	if (strstartswith(key, "Match"))
 		rc = parse_match(ctx, s, key, value);
-	else if (strneq(key, "Model", 5))
+	else if (strstartswith(key, "Model"))
 		rc = parse_model(ctx, s, key, value);
-	else if (strneq(key, "Attr", 4))
+	else if (strstartswith(key, "Attr"))
 		rc = parse_attr(ctx, s, key, value);
 	else
 		qlog_error(ctx, "Unknown value prefix %s\n", line);
@@ -1037,7 +1050,7 @@ parse_file(struct quirks_context *ctx, const char *path)
 					  path, lineno, line);
 				goto out;
 			case STATE_MATCH:
-				if (!strneq(line, "Match", 5)) {
+				if (!strstartswith(line, "Match")) {
 					qlog_parser(ctx, "%s:%d: expected MatchFoo=bar, have %s\n",
 							 path, lineno, line);
 					goto out;
@@ -1045,11 +1058,11 @@ parse_file(struct quirks_context *ctx, const char *path)
 				state = STATE_MATCH_OR_VALUE;
 				break;
 			case STATE_MATCH_OR_VALUE:
-				if (!strneq(line, "Match", 5))
+				if (!strstartswith(line, "Match"))
 					state = STATE_VALUE_OR_SECTION;
 				break;
 			case STATE_VALUE_OR_SECTION:
-				if (strneq(line, "Match", 5)) {
+				if (strstartswith(line, "Match")) {
 					qlog_parser(ctx, "%s:%d: expected value or [Section], have %s\n",
 							 path, lineno, line);
 					goto out;
@@ -1301,7 +1314,7 @@ match_fill_uniq(struct match *m,
 		str++;
 
 	m->uniq = safe_strdup(str);
-	slen = strlen(m->uniq);
+	slen = safe_strlen(m->uniq);
 	if (slen > 1 &&
 	    m->uniq[slen - 1] == '"')
 		m->uniq[slen - 1] = '\0';
@@ -1325,7 +1338,8 @@ match_fill_bus_vid_pid(struct match *m,
 	if (sscanf(str, "%x/%x/%x/%x", &bus, &vendor, &product, &version) != 4)
 		return;
 
-	m->product = product;
+	m->product[0] = product;
+	m->product[1] = 0;
 	m->vendor = vendor;
 	m->version = version;
 	m->bits |= M_PID|M_VID|M_VERSION;
@@ -1545,8 +1559,19 @@ quirk_match_section(struct quirks_context *ctx,
 				matched_flags |= flag;
 			break;
 		case M_PID:
-			if (m->product == s->match.product)
-				matched_flags |= flag;
+			ARRAY_FOR_EACH(m->product, mi) {
+				if (*mi == 0 || matched_flags & flag)
+					break;
+
+				ARRAY_FOR_EACH(s->match.product, si) {
+					if (*si == 0)
+						break;
+					if (*mi == *si) {
+						matched_flags |= flag;
+						break;
+					}
+				}
+			}
 			break;
 		case M_VERSION:
 			if (m->version == s->match.version)

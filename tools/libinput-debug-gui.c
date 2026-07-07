@@ -487,6 +487,7 @@ draw_evdev_abs(struct window *w, cairo_t *cr)
 	outline_height = 1.0 * height/width * normalized_width;
 	outline_width = normalized_width;
 
+	cairo_set_source_rgb(cr, .2, .2, .8);
 	x = 1.0 * (w->evdev.x - ax->minimum)/width * outline_width;
 	y = 1.0 * (w->evdev.y - ay->minimum)/height * outline_height;
 	x += center_x - outline_width/2;
@@ -498,7 +499,10 @@ draw_evdev_abs(struct window *w, cairo_t *cr)
 		if (!w->evdev.slots[i].active)
 			continue;
 
-		cairo_set_source_rgb(cr, .2, .2, .8);
+		cairo_set_source_rgb(cr,
+				     .2 + .2 * (i % 5),
+				     .2 + .2 * (i % 5),
+				     .8 - .2 * (i % 5));
 		x = w->evdev.slots[i].x;
 		y = w->evdev.slots[i].y;
 		x = 1.0 * (x - ax->minimum)/width * outline_width;
@@ -1655,6 +1659,7 @@ static void
 handle_event_tablet(struct libinput_event *ev, struct window *w)
 {
 	struct libinput_event_tablet_tool *t = libinput_event_get_tablet_tool_event(ev);
+	struct libinput_tablet_tool *tool = libinput_event_tablet_tool_get_tool(t);
 	double x, y;
 	struct point point;
 	int idx;
@@ -1667,6 +1672,7 @@ handle_event_tablet(struct libinput_event *ev, struct window *w)
 
 	switch (libinput_event_get_type(ev)) {
 	case LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY:
+		tools_tablet_tool_apply_config(tool, &w->options);
 		if (libinput_event_tablet_tool_get_proximity_state(t) ==
 		    LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_OUT) {
 			w->tool.x_in = 0;
@@ -1877,8 +1883,11 @@ sockets_init(struct libinput *li)
 }
 
 static void
-usage(void) {
+usage(struct option *opts) {
 	printf("Usage: libinput debug-gui [options] [--udev <seat>|[--device] /dev/input/event0]\n");
+
+	if (opts)
+		tools_print_usage_option_list(opts);
 }
 
 static gboolean
@@ -1942,7 +1951,7 @@ main(int argc, char **argv)
 			exit(EXIT_INVALID_USAGE);
 			break;
 		case 'h':
-			usage();
+			usage(opts);
 			exit(0);
 			break;
 		case OPT_DEVICE:
@@ -1961,7 +1970,7 @@ main(int argc, char **argv)
 			break;
 		default:
 			if (tools_parse_option(c, optarg, &options) != 0) {
-				usage();
+				usage(NULL);
 				return EXIT_INVALID_USAGE;
 			}
 			break;
@@ -1971,7 +1980,7 @@ main(int argc, char **argv)
 
 	if (optind < argc) {
 		if (optind < argc - 1 || backend != BACKEND_NONE) {
-			usage();
+			usage(NULL);
 			return EXIT_INVALID_USAGE;
 		}
 		backend = BACKEND_DEVICE;

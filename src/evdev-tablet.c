@@ -72,6 +72,27 @@ tablet_get_released_buttons(struct tablet_dispatch *tablet,
 					~(state->bits[i]);
 }
 
+static struct libinput_tablet_tool_pressure_threshold*
+tablet_tool_get_threshold(struct tablet_dispatch *tablet,
+			   struct libinput_tablet_tool *tool)
+{
+	ARRAY_FOR_EACH(tool->pressure.thresholds, threshold) {
+		if (threshold->tablet_id == tablet->tablet_id) {
+			return threshold;
+		}
+	}
+
+	/* If we ever get here, we failed detecting the proximity for this tablet
+	 * (or we have too many tablets). Return the first one which will
+	 * make things work incorrectly but we don't need to NULL-check
+	 * everything for an extremely unlikely situtation */
+	evdev_log_bug_libinput(tablet->device,
+			       "Failed to find tablet_id %d for pressure offsets\n",
+			       tablet->tablet_id);
+
+	return &tool->pressure.thresholds[0];
+}
+
 /* Merge the previous state with the current one so all buttons look like
  * they just got pressed in this frame */
 static inline void
@@ -260,6 +281,40 @@ tablet_process_absolute(struct tablet_dispatch *tablet,
 	}
 }
 
+static inline int
+axis_range_percentage(const struct input_absinfo *a, double percent)
+{
+	return (a->maximum - a->minimum) * percent/100.0 + a->minimum;
+}
+
+static void
+tablet_change_area(struct evdev_device *device)
+{
+	struct tablet_dispatch *tablet = tablet_dispatch(device->dispatch);
+
+	if (memcmp(&tablet->area.rect, &tablet->area.want_rect, sizeof(tablet->area.rect)) == 0)
+		return;
+
+	if (!tablet_has_status(tablet, TABLET_TOOL_OUT_OF_PROXIMITY))
+		return;
+
+	tablet->area.rect = tablet->area.want_rect;
+
+	evdev_log_debug(device,
+			"tablet-area: area is %.2f/%.2f - %.2f/%.2f\n",
+			tablet->area.rect.x1,
+			tablet->area.rect.y1,
+			tablet->area.rect.x2,
+			tablet->area.rect.y2);
+
+	const struct input_absinfo *absx = device->abs.absinfo_x;
+	const struct input_absinfo *absy = device->abs.absinfo_y;
+	tablet->area.x.minimum = axis_range_percentage(absx, tablet->area.rect.x1 * 100);
+	tablet->area.x.maximum = axis_range_percentage(absx, tablet->area.rect.x2 * 100);
+	tablet->area.y.minimum = axis_range_percentage(absy, tablet->area.rect.y1 * 100);
+	tablet->area.y.maximum = axis_range_percentage(absy, tablet->area.rect.y2 * 100);
+}
+
 static void
 tablet_apply_rotation(struct evdev_device *device)
 {
@@ -345,9 +400,8 @@ normalize_distance(const struct input_absinfo *absinfo)
 }
 
 static inline double
-normalize_pressure(const struct input_absinfo *absinfo,
-		   int abs_value,
-		   struct libinput_tablet_tool *tool)
+normalize_pressure(struct libinput_tablet_tool_pressure_threshold *threshold,
+		   int abs_value)
 {
 	/**
 	 * Note: the upper threshold takes the offset into account so that
@@ -360,9 +414,9 @@ normalize_pressure(const struct input_absinfo *absinfo,
 	 * The axis is scaled into the range [lower, max] so that the lower
 	 * threshold is 0 pressure.
 	 */
-	struct input_absinfo abs = *absinfo;
+	struct input_absinfo abs = threshold->abs_pressure;
 
-	abs.minimum = tool->pressure.threshold.lower;
+	abs.minimum = threshold->threshold.lower;
 
 	return absinfo_normalize_value(&abs, abs_value);
 }
@@ -442,6 +496,52 @@ normalize_wheel(struct tablet_dispatch *tablet,
 	return value * device->scroll.wheel_click_angle.x;
 }
 
+static bool
+is_inside_area(struct tablet_dispatch *tablet,
+	       const struct device_coords *point,
+	       double normalized_margin)
+{
+	if (tablet->area.rect.x1 == 0.0 && tablet->area.rect.x2 == 1.0 &&
+	    tablet->area.rect.y1 == 0.0 && tablet->area.rect.y2 == 1.0)
+		return true;
+
+	assert(normalized_margin > 0.0);
+	assert(normalized_margin <= 1.0);
+
+	int xmargin = (tablet->area.x.maximum - tablet->area.x.minimum) * normalized_margin;
+	int ymargin = (tablet->area.y.maximum - tablet->area.y.minimum) * normalized_margin;
+
+	return (point->x >= tablet->area.x.minimum - xmargin &&
+	        point->x <= tablet->area.x.maximum + xmargin &&
+	        point->y >= tablet->area.y.minimum - ymargin &&
+	        point->y <= tablet->area.y.maximum + ymargin);
+}
+
+static void
+apply_tablet_area(struct tablet_dispatch *tablet,
+		  struct evdev_device *device,
+		  struct device_coords *point)
+{
+	if (tablet->area.rect.x1 == 0.0 && tablet->area.rect.x2 == 1.0 &&
+	    tablet->area.rect.y1 == 0.0 && tablet->area.rect.y2 == 1.0)
+		return;
+
+	/* The point is somewhere on the tablet in device coordinates,
+	 * but we need it relative to the x/y offset.
+	 * So clip it first, then offset it to our area min/max.
+	 *
+	 * Right now we're just clipping, we don't completely
+	 * ignore events. What we should do is ignore events outside
+	 * altogether and generate prox in/out events when we actually
+	 * enter the area.
+	 */
+	point->x = min(point->x, tablet->area.x.maximum);
+	point->y = min(point->y, tablet->area.y.maximum);
+
+	point->x = max(point->x, tablet->area.x.minimum);
+	point->y = max(point->y, tablet->area.y.minimum);
+}
+
 static inline void
 tablet_update_xy(struct tablet_dispatch *tablet,
 		 struct evdev_device *device)
@@ -455,7 +555,7 @@ tablet_update_xy(struct tablet_dispatch *tablet,
 
 	if (bit_is_set(tablet->changed_axes, LIBINPUT_TABLET_TOOL_AXIS_X) ||
 	    bit_is_set(tablet->changed_axes, LIBINPUT_TABLET_TOOL_AXIS_Y)) {
-		absinfo = libevdev_get_abs_info(device->evdev, ABS_X);
+		absinfo = device->abs.absinfo_x;
 
 		if (tablet->rotation.rotate)
 			value = invert_axis(absinfo);
@@ -464,7 +564,7 @@ tablet_update_xy(struct tablet_dispatch *tablet,
 
 		tablet->axes.point.x = value;
 
-		absinfo = libevdev_get_abs_info(device->evdev, ABS_Y);
+		absinfo = device->abs.absinfo_y;
 
 		if (tablet->rotation.rotate)
 			value = invert_axis(absinfo);
@@ -473,7 +573,10 @@ tablet_update_xy(struct tablet_dispatch *tablet,
 
 		tablet->axes.point.y = value;
 
+		/* calibration and area are currently mutually exclusive so
+		 * one of those is a noop */
 		evdev_transform_absolute(device, &tablet->axes.point);
+		apply_tablet_area(tablet, device, &tablet->axes.point);
 	}
 }
 
@@ -530,9 +633,9 @@ tablet_update_pressure(struct tablet_dispatch *tablet,
 		return;
 
 	if (bit_is_set(tablet->changed_axes, LIBINPUT_TABLET_TOOL_AXIS_PRESSURE)) {
-		tablet->axes.pressure = normalize_pressure(&tool->pressure.abs_pressure,
-							   abs->value,
-							   tool);
+		struct libinput_tablet_tool_pressure_threshold *threshold =
+			tablet_tool_get_threshold(tablet, tool);
+		tablet->axes.pressure = normalize_pressure(threshold, abs->value);
 	}
 }
 
@@ -929,12 +1032,12 @@ copy_button_cap(const struct tablet_dispatch *tablet,
 		set_bit(tool->buttons, button);
 }
 
-#if HAVE_LIBWACOM
-static inline int
+static inline bool
 tool_set_bits_from_libwacom(const struct tablet_dispatch *tablet,
 			    struct libinput_tablet_tool *tool)
 {
-	int rc = 1;
+	bool rc = false;
+#if HAVE_LIBWACOM
 	WacomDeviceDatabase *db;
 	const WacomStylus *s = NULL;
 	int code;
@@ -992,11 +1095,10 @@ tool_set_bits_from_libwacom(const struct tablet_dispatch *tablet,
 	if (axes & WACOM_AXIS_TYPE_PRESSURE)
 		copy_axis_cap(tablet, tool, LIBINPUT_TABLET_TOOL_AXIS_PRESSURE);
 
-	rc = 0;
-
+	rc = true;
+#endif
 	return rc;
 }
-#endif
 
 static void
 tool_set_bits(const struct tablet_dispatch *tablet,
@@ -1007,10 +1109,9 @@ tool_set_bits(const struct tablet_dispatch *tablet,
 	copy_axis_cap(tablet, tool, LIBINPUT_TABLET_TOOL_AXIS_X);
 	copy_axis_cap(tablet, tool, LIBINPUT_TABLET_TOOL_AXIS_Y);
 
-#if HAVE_LIBWACOM
-	if (tool_set_bits_from_libwacom(tablet, tool) == 0)
+	if (tool_set_bits_from_libwacom(tablet, tool))
 		return;
-#endif
+
 	/* If we don't have libwacom, we simply copy any axis we have on the
 	   tablet onto the tool. Except we know that mice only have rotation
 	   anyway.
@@ -1072,12 +1173,6 @@ tool_set_bits(const struct tablet_dispatch *tablet,
 	}
 }
 
-static inline int
-axis_range_percentage(const struct input_absinfo *a, double percent)
-{
-	return (a->maximum - a->minimum) * percent/100.0 + a->minimum;
-}
-
 static bool
 tablet_get_quirked_pressure_thresholds(struct tablet_dispatch *tablet,
 				       int *hi,
@@ -1107,12 +1202,14 @@ tablet_get_quirked_pressure_thresholds(struct tablet_dispatch *tablet,
 
 static void
 apply_pressure_range_configuration(struct tablet_dispatch *tablet,
-				   struct libinput_tablet_tool *tool)
+				   struct libinput_tablet_tool *tool,
+				   bool force_update)
 {
 	struct evdev_device *device = tablet->device;
 
 	if (!libevdev_has_event_code(device->evdev, EV_ABS, ABS_PRESSURE) ||
-	    (tool->pressure.range.min == tool->pressure.wanted_range.min &&
+	    (!force_update &&
+	     tool->pressure.range.min == tool->pressure.wanted_range.min &&
 	     tool->pressure.range.max == tool->pressure.wanted_range.max))
 		return;
 
@@ -1137,46 +1234,51 @@ apply_pressure_range_configuration(struct tablet_dispatch *tablet,
 		lo = axis_range_percentage(&abs, 1);
 	}
 
-	tool->pressure.abs_pressure = abs;
-	tool->pressure.threshold.upper = hi;
-	tool->pressure.threshold.lower = lo;
+	struct libinput_tablet_tool_pressure_threshold *threshold =
+		tablet_tool_get_threshold(tablet, tool);
+	threshold->abs_pressure = abs;
+	threshold->threshold.upper = hi;
+	threshold->threshold.lower = lo;
 	tool->pressure.range.min = tool->pressure.wanted_range.min;
 	tool->pressure.range.max = tool->pressure.wanted_range.max;
 
 	/* Disable any heuristics */
 	if (tool->pressure.has_configured_range) {
-		tool->pressure.has_offset = true;
-		tool->pressure.heuristic_state = PRESSURE_HEURISTIC_STATE_DONE;
+		threshold->has_offset = true;
+		threshold->heuristic_state = PRESSURE_HEURISTIC_STATE_DONE;
 	}
 }
 
 static inline void
 tool_init_pressure_thresholds(struct tablet_dispatch *tablet,
-			      struct libinput_tablet_tool *tool)
+			      struct libinput_tablet_tool *tool,
+			      struct libinput_tablet_tool_pressure_threshold *threshold)
 {
 	struct evdev_device *device = tablet->device;
 	const struct input_absinfo *pressure, *distance;
 
-	tool->pressure.offset = 0;
-	tool->pressure.has_offset = false;
+	threshold->tablet_id = tablet->tablet_id;
+	threshold->offset = 0;
+	threshold->has_offset = false;
+	threshold->threshold.upper = 1;
+	threshold->threshold.lower = 0;
 
 	pressure = libevdev_get_abs_info(device->evdev, ABS_PRESSURE);
-	if (!pressure) {
-		tool->pressure.threshold.upper = 1;
-		tool->pressure.threshold.lower = 0;
+	if (!pressure)
 		return;
-	}
+
+	threshold->abs_pressure = *pressure;
 
 	distance = libevdev_get_abs_info(device->evdev, ABS_DISTANCE);
 	if (distance) {
-		tool->pressure.offset = pressure->minimum;
-		tool->pressure.heuristic_state = PRESSURE_HEURISTIC_STATE_DONE;
+		threshold->offset = pressure->minimum;
+		threshold->heuristic_state = PRESSURE_HEURISTIC_STATE_DONE;
 	} else {
-		tool->pressure.offset = pressure->maximum;
-		tool->pressure.heuristic_state = PRESSURE_HEURISTIC_STATE_PROXIN1;
+		threshold->offset = pressure->maximum;
+		threshold->heuristic_state = PRESSURE_HEURISTIC_STATE_PROXIN1;
 	}
 
-	apply_pressure_range_configuration(tablet, tool);
+	apply_pressure_range_configuration(tablet, tool, true);
 }
 
 static int
@@ -1237,19 +1339,7 @@ tablet_new_tool(struct tablet_dispatch *tablet,
 		.config.pressure_range.get_default = pressure_range_get_default,
 	};
 
-	/* Copy the pressure axis for configuring the range later */
-	struct evdev_device *device = tablet->device;
-	const struct input_absinfo *abs = libevdev_get_abs_info(device->evdev,
-								ABS_PRESSURE);
-	if (abs)
-		tool->pressure.abs_pressure = *abs;
-
-	/* FIXME: known bug - the pressure threshold is only set once on the
-	 * first tablet, if a tool is used across multiple tablets with
-	 * different pressure ranges this will be wrong. This case is niche
-	 * enough that we can fix it if we ever run into it.
-	 */
-	tool_init_pressure_thresholds(tablet, tool);
+	tool_init_pressure_thresholds(tablet, tool, &tool->pressure.thresholds[0]);
 	tool_set_bits(tablet, tool);
 
 	return tool;
@@ -1307,6 +1397,15 @@ tablet_get_tool(struct tablet_dispatch *tablet,
 	if (!tool) {
 		tool = tablet_new_tool(tablet, type, tool_id, serial);
 		list_insert(tool_list, &tool->link);
+	} else {
+		ARRAY_FOR_EACH(tool->pressure.thresholds, t) {
+			if (t->tablet_id == tablet->tablet_id)
+				break;
+			if (t->tablet_id == 0) {
+				tool_init_pressure_thresholds(tablet, tool, t);
+				break;
+			}
+		}
 	}
 
 	return tool;
@@ -1340,7 +1439,9 @@ tablet_notify_button_mask(struct tablet_dispatch *tablet,
 				     tip_state,
 				     &tablet->axes,
 				     i,
-				     state);
+				     state,
+				     &tablet->area.x,
+				     &tablet->area.y);
 	}
 }
 
@@ -1391,7 +1492,9 @@ sanitize_pressure_distance(struct tablet_dispatch *tablet,
 	/* Note: this is an arbitrary "in contact" decision rather than "tip
 	 * down". We use the lower threshold as minimum pressure value,
 	 * anything less than that gets filtered away */
-	tool_in_contact = (pressure->value > tool->pressure.threshold.lower);
+	struct libinput_tablet_tool_pressure_threshold* threshold =
+		tablet_tool_get_threshold(tablet, tool);
+	tool_in_contact = (pressure->value > threshold->threshold.lower);
 
 	/* Keep distance and pressure mutually exclusive */
 	if (distance &&
@@ -1437,18 +1540,18 @@ sanitize_tablet_axes(struct tablet_dispatch *tablet,
 }
 
 static void
-set_pressure_offset(struct libinput_tablet_tool *tool, int offset)
+set_pressure_offset(struct libinput_tablet_tool_pressure_threshold *threshold, int offset)
 {
-	tool->pressure.offset = offset;
-	tool->pressure.has_offset = true;
+	threshold->offset = offset;
+	threshold->has_offset = true;
 
 	/* Adjust the tresholds accordingly - we use the same gap (4% in
 	 * device coordinates) between upper and lower as before which isn't
 	 * technically correct (our range shrunk) but it's easy to calculate.
 	 */
-	int gap = tool->pressure.threshold.upper - tool->pressure.threshold.lower;
-	tool->pressure.threshold.lower = offset;
-	tool->pressure.threshold.upper = offset + gap;
+	int gap = threshold->threshold.upper - threshold->threshold.lower;
+	threshold->threshold.lower = offset;
+	threshold->threshold.upper = offset + gap;
 }
 
 static void
@@ -1472,11 +1575,13 @@ update_pressure_offset(struct tablet_dispatch *tablet,
 	 * offset value, don't actually set it to have an offset.
 	 */
 	int offset = pressure->value;
-	if (tool->pressure.has_offset) {
-		if (offset < tool->pressure.offset)
-			set_pressure_offset(tool, offset);
-	} else if (tool->pressure.heuristic_state != PRESSURE_HEURISTIC_STATE_DONE) {
-		tool->pressure.offset = min(offset, tool->pressure.offset);
+	struct libinput_tablet_tool_pressure_threshold *threshold =
+		tablet_tool_get_threshold(tablet, tool);
+	if (threshold->has_offset) {
+		if (offset < threshold->offset)
+			set_pressure_offset(threshold, offset);
+	} else if (threshold->heuristic_state != PRESSURE_HEURISTIC_STATE_DONE) {
+		threshold->offset = min(offset, threshold->offset);
 	}
 }
 
@@ -1488,8 +1593,13 @@ detect_pressure_offset(struct tablet_dispatch *tablet,
 	const struct input_absinfo *pressure, *distance;
 	int offset;
 
-	if (tool->pressure.has_offset || tool->pressure.has_configured_range ||
+	if (tool->pressure.has_configured_range ||
 	    !bit_is_set(tablet->changed_axes, LIBINPUT_TABLET_TOOL_AXIS_PRESSURE))
+		return;
+
+	struct libinput_tablet_tool_pressure_threshold *threshold =
+		tablet_tool_get_threshold(tablet, tool);
+	if (threshold->has_offset)
 		return;
 
 	pressure = libevdev_get_abs_info(device->evdev, ABS_PRESSURE);
@@ -1515,16 +1625,16 @@ detect_pressure_offset(struct tablet_dispatch *tablet,
                  * deciding prox-in arrives we should know the minimum offset.
                  */
                 if (offset > pressure->minimum)
-			tool->pressure.offset = min(offset, tool->pressure.offset);
+			threshold->offset = min(offset, threshold->offset);
 
-		switch (tool->pressure.heuristic_state) {
+		switch (threshold->heuristic_state) {
 		case PRESSURE_HEURISTIC_STATE_PROXIN1:
 		case PRESSURE_HEURISTIC_STATE_PROXIN2:
-			tool->pressure.heuristic_state++;
+			threshold->heuristic_state++;
 			return;
 		case PRESSURE_HEURISTIC_STATE_DECIDE:
-			tool->pressure.heuristic_state++;
-			offset = tool->pressure.offset;
+			threshold->heuristic_state++;
+			offset = threshold->offset;
 			break;
 		case PRESSURE_HEURISTIC_STATE_DONE:
 			return;
@@ -1551,7 +1661,7 @@ detect_pressure_offset(struct tablet_dispatch *tablet,
 		 tool->serial,
 		 HTTP_DOC_LINK);
 
-	set_pressure_offset(tool, offset);
+	set_pressure_offset(threshold, offset);
 }
 
 static void
@@ -1582,10 +1692,12 @@ detect_tool_contact(struct tablet_dispatch *tablet,
 	}
 	pressure = p->value;
 
-	if (pressure <= tool->pressure.threshold.lower &&
+	struct libinput_tablet_tool_pressure_threshold *threshold =
+		tablet_tool_get_threshold(tablet, tool);
+	if (pressure <= threshold->threshold.lower &&
 	    tablet_has_status(tablet, TABLET_TOOL_IN_CONTACT)) {
 		tablet_set_status(tablet, TABLET_TOOL_LEAVING_CONTACT);
-	} else if (pressure >= tool->pressure.threshold.upper &&
+	} else if (pressure >= threshold->threshold.upper &&
 		   !tablet_has_status(tablet, TABLET_TOOL_IN_CONTACT)) {
 		tablet_set_status(tablet, TABLET_TOOL_ENTERING_CONTACT);
 	}
@@ -1739,7 +1851,9 @@ tablet_send_proximity_in(struct tablet_dispatch *tablet,
 				tool,
 				LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN,
 				tablet->changed_axes,
-				axes);
+				axes,
+				&tablet->area.x,
+				&tablet->area.y);
 	tablet_unset_status(tablet, TABLET_TOOL_ENTERING_PROXIMITY);
 	tablet_unset_status(tablet, TABLET_AXES_UPDATED);
 
@@ -1750,31 +1864,24 @@ tablet_send_proximity_in(struct tablet_dispatch *tablet,
 	return true;
 }
 
-static inline bool
+static inline void
 tablet_send_proximity_out(struct tablet_dispatch *tablet,
 			 struct libinput_tablet_tool *tool,
 			 struct evdev_device *device,
 			 struct tablet_axes *axes,
 			 uint64_t time)
 {
-	if (!tablet_has_status(tablet, TABLET_TOOL_LEAVING_PROXIMITY))
-		return false;
-
-	tablet_notify_proximity(&device->base,
-				time,
-				tool,
-				LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_OUT,
-				tablet->changed_axes,
-				axes);
-
-	tablet_set_status(tablet, TABLET_TOOL_OUT_OF_PROXIMITY);
-	tablet_unset_status(tablet, TABLET_TOOL_LEAVING_PROXIMITY);
-
-	tablet_reset_changed_axes(tablet);
-	axes->delta.x = 0;
-	axes->delta.y = 0;
-
-	return true;
+	if (tablet_has_status(tablet, TABLET_TOOL_LEAVING_PROXIMITY) &&
+	    !tablet_has_status(tablet, TABLET_TOOL_OUTSIDE_AREA)) {
+		tablet_notify_proximity(&device->base,
+					time,
+					tool,
+					LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_OUT,
+					tablet->changed_axes,
+					axes,
+					&tablet->area.x,
+					&tablet->area.y);
+	}
 }
 
 static inline bool
@@ -1790,7 +1897,9 @@ tablet_send_tip(struct tablet_dispatch *tablet,
 				  tool,
 				  LIBINPUT_TABLET_TOOL_TIP_DOWN,
 				  tablet->changed_axes,
-				  axes);
+				  axes,
+				  &tablet->area.x,
+				  &tablet->area.y);
 		tablet_unset_status(tablet, TABLET_AXES_UPDATED);
 		tablet_unset_status(tablet, TABLET_TOOL_ENTERING_CONTACT);
 		tablet_set_status(tablet, TABLET_TOOL_IN_CONTACT);
@@ -1808,7 +1917,9 @@ tablet_send_tip(struct tablet_dispatch *tablet,
 				  tool,
 				  LIBINPUT_TABLET_TOOL_TIP_UP,
 				  tablet->changed_axes,
-				  axes);
+				  axes,
+				  &tablet->area.x,
+				  &tablet->area.y);
 		tablet_unset_status(tablet, TABLET_AXES_UPDATED);
 		tablet_unset_status(tablet, TABLET_TOOL_LEAVING_CONTACT);
 		tablet_unset_status(tablet, TABLET_TOOL_IN_CONTACT);
@@ -1846,7 +1957,9 @@ tablet_send_axes(struct tablet_dispatch *tablet,
 			   tool,
 			   tip_state,
 			   tablet->changed_axes,
-			   axes);
+			   axes,
+			   &tablet->area.x,
+			   &tablet->area.y);
 	tablet_unset_status(tablet, TABLET_AXES_UPDATED);
 	tablet_reset_changed_axes(tablet);
 	axes->delta.x = 0;
@@ -1913,11 +2026,7 @@ tablet_send_events(struct tablet_dispatch *tablet,
 
 	tablet_send_buttons(tablet, tool, device, time);
 
-	if (tablet_send_proximity_out(tablet, tool, device, &axes, time)) {
-		tablet_change_to_left_handed(device);
-		tablet_apply_rotation(device);
-		tablet_history_reset(tablet);
-	}
+	tablet_send_proximity_out(tablet, tool, device, &axes, time);
 }
 
 /**
@@ -2104,20 +2213,58 @@ reprocess:
 		tablet_set_status(tablet, TABLET_BUTTONS_RELEASED);
 		if (tablet_has_status(tablet, TABLET_TOOL_IN_CONTACT))
 			tablet_set_status(tablet, TABLET_TOOL_LEAVING_CONTACT);
-		apply_pressure_range_configuration(tablet, tool);
-	} else if (tablet_has_status(tablet, TABLET_TOOL_ENTERING_PROXIMITY)) {
-		tablet_mark_all_axes_changed(tablet, tool);
-		update_pressure_offset(tablet, device, tool);
-		detect_pressure_offset(tablet, device, tool);
-		detect_tool_contact(tablet, device, tool);
-		sanitize_tablet_axes(tablet, tool);
-	} else if (tablet_has_status(tablet, TABLET_AXES_UPDATED)) {
-		update_pressure_offset(tablet, device, tool);
-		detect_tool_contact(tablet, device, tool);
-		sanitize_tablet_axes(tablet, tool);
+		apply_pressure_range_configuration(tablet, tool, false);
+	} else if (!tablet_has_status(tablet, TABLET_TOOL_OUTSIDE_AREA)) {
+		if (tablet_has_status(tablet, TABLET_TOOL_ENTERING_PROXIMITY)) {
+			/* If we get into proximity outside the tablet area, we ignore
+			 * that whole sequence of events even if we later move into
+			 * the allowed area. This may be bad UX but it's complicated to
+			 * implement so let's wait for someone to actually complain
+			 * about it.
+			 *
+			 * We allow a margin of 3% (6mm on a 200mm tablet) to be "within"
+			 * the area - there we clip to the area but do not ignore the
+			 * sequence.
+			 */
+			const struct device_coords point = {
+				device->abs.absinfo_x->value,
+				device->abs.absinfo_y->value,
+			};
+
+			const double margin = 0.03;
+			if (is_inside_area(tablet, &point, margin)) {
+				tablet_mark_all_axes_changed(tablet, tool);
+				update_pressure_offset(tablet, device, tool);
+				detect_pressure_offset(tablet, device, tool);
+				detect_tool_contact(tablet, device, tool);
+				sanitize_tablet_axes(tablet, tool);
+			} else {
+				tablet_set_status(tablet, TABLET_TOOL_OUTSIDE_AREA);
+				tablet_unset_status(tablet, TABLET_TOOL_ENTERING_PROXIMITY);
+			}
+		} else if (tablet_has_status(tablet, TABLET_AXES_UPDATED)) {
+			update_pressure_offset(tablet, device, tool);
+			detect_tool_contact(tablet, device, tool);
+			sanitize_tablet_axes(tablet, tool);
+		}
+
 	}
 
-	tablet_send_events(tablet, tool, device, time);
+	if (!tablet_has_status(tablet, TABLET_TOOL_OUTSIDE_AREA))
+		tablet_send_events(tablet, tool, device, time);
+
+	if (tablet_has_status(tablet, TABLET_TOOL_LEAVING_PROXIMITY)) {
+		tablet_set_status(tablet, TABLET_TOOL_OUT_OF_PROXIMITY);
+		tablet_unset_status(tablet, TABLET_TOOL_LEAVING_PROXIMITY);
+		tablet_unset_status(tablet, TABLET_TOOL_OUTSIDE_AREA);
+
+		tablet_reset_changed_axes(tablet);
+
+		tablet_change_to_left_handed(device);
+		tablet_apply_rotation(device);
+		tablet_change_area(device);
+		tablet_history_reset(tablet);
+	}
 
 	if (process_tool_twice)
 		goto reprocess;
@@ -2306,6 +2453,15 @@ tablet_destroy(struct evdev_dispatch *dispatch)
 
 	libinput_timer_cancel(&tablet->quirks.prox_out_timer);
 	libinput_timer_destroy(&tablet->quirks.prox_out_timer);
+
+	list_for_each(tool, &li->tool_list, link) {
+		ARRAY_FOR_EACH(tool->pressure.thresholds, threshold) {
+			if (threshold->tablet_id == tablet->tablet_id) {
+				threshold->tablet_id = 0;
+				break;
+			}
+		}
+	}
 
 	list_for_each_safe(tool, &tablet->tool_list, link) {
 		libinput_tablet_tool_unref(tool);
@@ -2496,10 +2652,76 @@ static struct evdev_dispatch_interface tablet_interface = {
 
 static void
 tablet_init_calibration(struct tablet_dispatch *tablet,
-			struct evdev_device *device)
+			struct evdev_device *device,
+			bool is_display_tablet)
 {
-	if (libevdev_has_property(device->evdev, INPUT_PROP_DIRECT))
+	if (is_display_tablet || libevdev_has_property(device->evdev, INPUT_PROP_DIRECT))
 		evdev_init_calibration(device, &tablet->calibration);
+}
+
+static int
+tablet_area_has_rectangle(struct libinput_device *device)
+{
+	return 1;
+}
+
+static enum libinput_config_status
+tablet_area_set_rectangle(struct libinput_device *device,
+			  const struct libinput_config_area_rectangle *rectangle)
+{
+	struct evdev_device *evdev = evdev_device(device);
+	struct tablet_dispatch *tablet = tablet_dispatch(evdev->dispatch);
+
+	if (rectangle->x1 >= rectangle->x2 || rectangle->y1 >= rectangle->y2)
+		return LIBINPUT_CONFIG_STATUS_INVALID;
+
+	if (rectangle->x1 < 0.0 || rectangle->x2 > 1.0 ||
+	    rectangle->y1 < 0.0 || rectangle->y2 > 1.0)
+		return LIBINPUT_CONFIG_STATUS_INVALID;
+
+	tablet->area.want_rect = *rectangle;
+
+	tablet_change_area(evdev);
+
+	return LIBINPUT_CONFIG_STATUS_SUCCESS;
+}
+
+static struct libinput_config_area_rectangle
+tablet_area_get_rectangle(struct libinput_device *device)
+{
+	struct evdev_device *evdev = evdev_device(device);
+	struct tablet_dispatch *tablet = tablet_dispatch(evdev->dispatch);
+
+	return tablet->area.rect;
+}
+
+static struct libinput_config_area_rectangle
+tablet_area_get_default_rectangle(struct libinput_device *device)
+{
+	struct libinput_config_area_rectangle rect = {
+		0.0, 0.0, 1.0, 1.0,
+	};
+	return rect;
+}
+
+static void
+tablet_init_area(struct tablet_dispatch *tablet,
+		 struct evdev_device *device)
+{
+	tablet->area.rect = (struct libinput_config_area_rectangle) {
+		0.0, 0.0, 1.0, 1.0,
+	};
+	tablet->area.want_rect = tablet->area.rect;
+	tablet->area.x = *device->abs.absinfo_x;
+	tablet->area.y = *device->abs.absinfo_y;
+
+	if (!libevdev_has_property(device->evdev, INPUT_PROP_DIRECT)) {
+		device->base.config.area = &tablet->area.config;
+		tablet->area.config.has_rectangle = tablet_area_has_rectangle;
+		tablet->area.config.set_rectangle = tablet_area_set_rectangle;
+		tablet->area.config.get_rectangle = tablet_area_get_rectangle;
+		tablet->area.config.get_default_rectangle = tablet_area_get_default_rectangle;
+	}
 }
 
 static void
@@ -2578,62 +2800,59 @@ tablet_init_accel(struct tablet_dispatch *tablet, struct evdev_device *device)
 }
 
 static void
-tablet_init_left_handed(struct evdev_device *device)
+tablet_init_left_handed(struct evdev_device *device,
+			WacomDevice *wacom)
 {
-	if (evdev_tablet_has_left_handed(device))
+	bool has_left_handed = true;
+
+#if HAVE_LIBWACOM
+	has_left_handed = !wacom || libwacom_is_reversible(wacom);
+#endif
+	if (has_left_handed)
 		evdev_init_left_handed(device,
 				       tablet_change_to_left_handed);
 }
 
-static bool
-tablet_is_aes(struct evdev_device *device,
-	      struct tablet_dispatch *tablet)
+static inline bool
+tablet_is_display_tablet(WacomDevice *wacom)
 {
-	bool is_aes = false;
 #if HAVE_LIBWACOM
-	const char *devnode;
-	WacomDeviceDatabase *db;
-	WacomDevice *libwacom_device = NULL;
-	const int *stylus_ids;
-	int nstyli;
-	int vid = evdev_device_get_id_vendor(device);
+	return !wacom ||
+		(libwacom_get_integration_flags(wacom) & (WACOM_DEVICE_INTEGRATED_SYSTEM|WACOM_DEVICE_INTEGRATED_DISPLAY));
+#else
+	return true;
+#endif
+}
 
+static inline bool
+tablet_is_aes(struct evdev_device *device, WacomDevice *wacom)
+{
+#if HAVE_LIBWACOM
+	int vid = evdev_device_get_id_vendor(device);
 	/* Wacom-specific check for whether smoothing is required:
 	 * libwacom keeps all the AES pens in a single group, so any device
 	 * that supports AES pens will list all AES pens. 0x11 is one of the
 	 * lenovo pens so we use that as the flag of whether the tablet
 	 * is an AES tablet
 	 */
-	if (vid != VENDOR_ID_WACOM)
-		goto out;
-
-	db = tablet_libinput_context(tablet)->libwacom.db;
-	if (!db)
-		goto out;
-
-	devnode = udev_device_get_devnode(device->udev_device);
-	libwacom_device = libwacom_new_from_path(db, devnode, WFALLBACK_NONE, NULL);
-	if (!libwacom_device)
-		goto out;
-
-	stylus_ids = libwacom_get_supported_styli(libwacom_device, &nstyli);
-	for (int i = 0; i < nstyli; i++) {
-		if (stylus_ids[i] == 0x11) {
-			is_aes = true;
-			break;
+	if (wacom && vid == VENDOR_ID_WACOM) {
+		int nstyli;
+		const int *stylus_ids = libwacom_get_supported_styli(wacom, &nstyli);
+		for (int i = 0; i < nstyli; i++) {
+			if (stylus_ids[i] == 0x11) {
+				return true;
+			}
 		}
 	}
-
-	libwacom_destroy(libwacom_device);
-
-out:
 #endif
-	return is_aes;
+
+	return false;
 }
 
 static void
 tablet_init_smoothing(struct evdev_device *device,
-		      struct tablet_dispatch *tablet)
+		      struct tablet_dispatch *tablet,
+		      bool is_aes)
 {
 	size_t history_size = ARRAY_LENGTH(tablet->history.samples);
 	struct quirks_context *quirks = NULL;
@@ -2647,7 +2866,7 @@ tablet_init_smoothing(struct evdev_device *device,
 	 * AttrTabletSmoothing can override this, if necessary.
 	 */
 	if (!q || !quirks_get_bool(q, QUIRK_ATTR_TABLET_SMOOTHING, &use_smoothing))
-		use_smoothing = !tablet_is_aes(device, tablet);
+		use_smoothing = !is_aes;
 
 	/* Setting the history size to 1 means we never do any actual smoothing. */
 	if (!use_smoothing)
@@ -2738,10 +2957,38 @@ static int
 tablet_init(struct tablet_dispatch *tablet,
 	    struct evdev_device *device)
 {
+	static unsigned int tablet_ids = 0;
+	struct libinput *li = evdev_libinput_context(device);
 	struct libevdev *evdev = device->evdev;
 	enum libinput_tablet_tool_axis axis;
-	int rc;
+	int rc = -1;
+	WacomDevice *wacom = NULL;
+#if HAVE_LIBWACOM
+	WacomDeviceDatabase *db = libinput_libwacom_ref(li);
+	if (db) {
+		char event_path[64];
+		snprintf(event_path,
+			 sizeof(event_path),
+			 "/dev/input/%s",
+			 evdev_device_get_sysname(device));
+		wacom = libwacom_new_from_path(db, event_path, WFALLBACK_NONE, NULL);
+		if (!wacom) {
+			wacom = libwacom_new_from_usbid(db,
+							evdev_device_get_id_vendor(device),
+							evdev_device_get_id_product(device),
+							NULL);
+		}
+		if (!wacom) {
+			evdev_log_info(device,
+				       "device \"%s\" (%04x:%04x) is not known to libwacom\n",
+				       evdev_device_get_name(device),
+				       evdev_device_get_id_vendor(device),
+				       evdev_device_get_id_product(device));
+		}
+	}
+#endif
 
+	tablet->tablet_id = ++tablet_ids;
 	tablet->base.dispatch_type = DISPATCH_TABLET;
 	tablet->base.interface = &tablet_interface;
 	tablet->device = device;
@@ -2750,7 +2997,10 @@ tablet_init(struct tablet_dispatch *tablet,
 	list_init(&tablet->tool_list);
 
 	if (tablet_reject_device(device))
-		return -1;
+		goto out;
+
+	bool is_aes = tablet_is_aes(device, wacom);
+	bool is_display_tablet = tablet_is_display_tablet(wacom);
 
 	if (!libevdev_has_event_code(evdev, EV_KEY, BTN_TOOL_PEN)) {
 		libevdev_enable_event_code(evdev, EV_KEY, BTN_TOOL_PEN, NULL);
@@ -2765,15 +3015,16 @@ tablet_init(struct tablet_dispatch *tablet,
 	}
 
 	tablet_fix_tilt(tablet, device);
-	tablet_init_calibration(tablet, device);
+	tablet_init_calibration(tablet, device, is_display_tablet);
+	tablet_init_area(tablet, device);
 	tablet_init_proximity_threshold(tablet, device);
 	rc = tablet_init_accel(tablet, device);
 	if (rc != 0)
-		return rc;
+		goto out;
 
 	evdev_init_sendevents(device, &tablet->base);
-	tablet_init_left_handed(device);
-	tablet_init_smoothing(device, tablet);
+	tablet_init_left_handed(device, wacom);
+	tablet_init_smoothing(device, tablet, is_aes);
 
 	for (axis = LIBINPUT_TABLET_TOOL_AXIS_X;
 	     axis <= LIBINPUT_TABLET_TOOL_AXIS_MAX;
@@ -2789,12 +3040,20 @@ tablet_init(struct tablet_dispatch *tablet,
 	tablet->quirks.need_to_force_prox_out = true;
 
 	libinput_timer_init(&tablet->quirks.prox_out_timer,
-			    tablet_libinput_context(tablet),
+			    li,
 			    "proxout",
 			    tablet_proximity_out_quirk_timer_func,
 			    tablet);
 
-	return 0;
+	rc = 0;
+out:
+#if HAVE_LIBWACOM
+	if (wacom)
+		libwacom_destroy(wacom);
+	if (db)
+		libinput_libwacom_unref(li);
+#endif
+	return rc;
 }
 
 struct evdev_dispatch *
