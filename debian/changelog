@@ -1,3 +1,9 @@
+libinput (1.28.1-1+deb13u1deepin1) unstable; urgency=medium
+
+  * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
+
+ -- tunaichao <tunaichao@uniontech.com>  Mon, 21 Sep 2026 15:22:26 +0800
+
 libinput (1.28.1-1+deb13u1) trixie-security; urgency=high
 
   * Non-maintainer upload by the Security Team.
