@@ -1,3 +1,14 @@
+libinput (1.28.1-1+deb13u1deepin3) unstable; urgency=medium
+
+  * Backport upstream INPUT_PROP_PRESSUREPAD support for haptic/pressure
+    touchpads.
+  * Add the missing header definition, the libevdev < 1.13.6 name fallback
+    in the quirks parser and the pressurepad detection.
+  * Import upstream touchpad quirk entries for newer Goodix, Elan, Pixart,
+    Synaptics, Dell and other models.
+
+ -- lichenggang <lichenggang@uniontech.com>  Mon, 16 Nov 2026 22:08:49 +0800
+
 libinput (1.28.1-1+deb13u1deepin2) unstable; urgency=medium
 
   * Add a DMI-scoped ModelPressurePad quirk for the Lenovo ThinkBook
