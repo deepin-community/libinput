@@ -1,3 +1,16 @@
+libinput (1.28.1-1+deb13u1deepin2) unstable; urgency=medium
+
+  * Add a DMI-scoped ModelPressurePad quirk for the Lenovo ThinkBook
+    14/16 G8+ IPH touchpad.
+  * Use ModelPressurePad instead of AttrInputProp=+INPUT_PROP_PRESSUREPAD:
+    the latter is unknown to libevdev < 1.13.6 and made libinput discard
+    the whole quirks database, breaking touchpads on other models.
+  * Match the exact DMI modalias instead of the shared Goodix USB IDs
+    27C6:01E7/27C6:01E8.
+  * Ref: https://gitlab.freedesktop.org/libinput/libinput/-/merge_requests/1442
+
+ -- lichenggang <lichenggang@uniontech.com>  Mon, 16 Nov 2026 19:00:18 +0800
+
 libinput (1.28.1-1+deb13u1deepin1) unstable; urgency=medium
 
   * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
