@@ -3,3 +3,5 @@ tools-remove-references-to-libinput_quir.patch
 util-don-t-call-function-in-macro-argument.patch
 util-sanitize-control-characters-in-str_sanitize.patch
 libinput-device-group-sanitize-phys-before-printing-.patch
+0001-touchpad-support-INPUT_PROP_PRESSUREPAD.patch
+0002-quirks-add-upstream-touchpad-support.patch
