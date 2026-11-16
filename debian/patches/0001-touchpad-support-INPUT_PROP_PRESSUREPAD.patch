@@ -1,0 +1,102 @@
+From: lichenggang <lichenggang@uniontech.com>
+Date: Mon, 16 Nov 2026 20:10:00 +0800
+Subject: touchpad: support INPUT_PROP_PRESSUREPAD
+
+Backport the upstream support for the INPUT_PROP_PRESSUREPAD input
+property, which is what upstream uses to mark a haptic touchpad (also
+called pressure pad or forcepad) as such.
+
+Three pieces are needed and they come from upstream:
+
+  a) The vendored linux headers do not define
+     INPUT_PROP_PRESSUREPAD (0x07). Upstream added it in
+     7621edab ("include: sync headers with kernel 6.18"), so do the
+     same here or the new code below does not compile.
+
+  b) parse_input_prop_property() resolves AttrInputProp entries by name
+     through libevdev_property_from_name(). libevdev < 1.13.6 does not
+     know "INPUT_PROP_PRESSUREPAD" and returns -1, which makes the
+     parser fail. Upstream added a name-specific fallback in db6a0466
+     ("touchpad: use INPUT_PROP_PRESSUREPAD as signal it's a
+     pressurepad"); without it a quirk using this property makes
+     libinput discard the *entire* quirks database, which is the bug
+     behind the reverted debian patch (see PR #8).
+
+  c) tp_init_pressurepad() only looked at the ABS_MT_PRESSURE resolution
+     and at ModelPressurePad. Upstream made it honour
+     INPUT_PROP_PRESSUREPAD as well in db6a0466, so a device marked by
+     the property actually gets the pressure axes disabled.
+
+Keeping QUIRK_MODEL_PRESSURE_PAD is deliberate: the ModelPressurePad
+quirk stays valid for this version, and the existing quirks that use it
+(e.g. Lenovo ThinkBook G6+/G7+, HONOR MagicBook Art 14) must keep
+working.
+
+Forwarded: not-needed (backport of 7621edab + db6a0466)
+Signed-off-by: lichenggang <lichenggang@uniontech.com>
+---
+ include/linux/freebsd/input-event-codes.h | 1 +
+ include/linux/linux/input-event-codes.h   | 1 +
+ src/evdev-mt-touchpad.c                   | 3 ++-
+ src/util-prop-parsers.c                   | 10 ++++++++--
+ 4 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/include/linux/freebsd/input-event-codes.h b/include/linux/freebsd/input-event-codes.h
+index 0c2e27d..37f8e48 100644
+--- a/include/linux/freebsd/input-event-codes.h
++++ b/include/linux/freebsd/input-event-codes.h
+@@ -27,6 +27,7 @@
+ #define INPUT_PROP_TOPBUTTONPAD		0x04	/* softbuttons at top of pad */
+ #define INPUT_PROP_POINTING_STICK	0x05	/* is a pointing stick */
+ #define INPUT_PROP_ACCELEROMETER	0x06	/* has accelerometer */
++#define INPUT_PROP_PRESSUREPAD		0x07	/* pressure triggers clicks */
+ 
+ #define INPUT_PROP_MAX			0x1f
+ #define INPUT_PROP_CNT			(INPUT_PROP_MAX + 1)
+diff --git a/include/linux/linux/input-event-codes.h b/include/linux/linux/input-event-codes.h
+index 0c2e27d..37f8e48 100644
+--- a/include/linux/linux/input-event-codes.h
++++ b/include/linux/linux/input-event-codes.h
+@@ -27,6 +27,7 @@
+ #define INPUT_PROP_TOPBUTTONPAD		0x04	/* softbuttons at top of pad */
+ #define INPUT_PROP_POINTING_STICK	0x05	/* is a pointing stick */
+ #define INPUT_PROP_ACCELEROMETER	0x06	/* has accelerometer */
++#define INPUT_PROP_PRESSUREPAD		0x07	/* pressure triggers clicks */
+ 
+ #define INPUT_PROP_MAX			0x1f
+ #define INPUT_PROP_CNT			(INPUT_PROP_MAX + 1)
+diff --git a/src/evdev-mt-touchpad.c b/src/evdev-mt-touchpad.c
+index 909e8f0..14dcbc4 100644
+--- a/src/evdev-mt-touchpad.c
++++ b/src/evdev-mt-touchpad.c
+@@ -3733,7 +3733,8 @@ tp_init_pressurepad(struct tp_dispatch *tp,
+ 	 *
+ 	 * See also #562
+ 	 */
+-	if (libevdev_get_abs_resolution(device->evdev, ABS_MT_PRESSURE) != 0 ||
++	if (libevdev_has_property(device->evdev, INPUT_PROP_PRESSUREPAD) ||
++	    libevdev_get_abs_resolution(device->evdev, ABS_MT_PRESSURE) != 0 ||
+ 	    evdev_device_has_model_quirk(device, QUIRK_MODEL_PRESSURE_PAD)) {
+ 		libevdev_disable_event_code(device->evdev, EV_ABS, ABS_MT_PRESSURE);
+ 		libevdev_disable_event_code(device->evdev, EV_ABS, ABS_PRESSURE);
+diff --git a/src/util-prop-parsers.c b/src/util-prop-parsers.c
+index fc829e9..084cf4a 100644
+--- a/src/util-prop-parsers.c
++++ b/src/util-prop-parsers.c
+@@ -465,8 +465,14 @@ parse_input_prop_property(const char *prop, struct input_prop *props_out, size_t
+ 				goto out;
+ 		} else {
+ 			int val = libevdev_property_from_name(s);
+-			if (val == -1)
+-				goto out;
++			if (val == -1) {
++				/* Remove once we require libevdev 1.13.6 */
++				if (streq(s, "INPUT_PROP_PRESSUREPAD")) {
++					val = INPUT_PROP_PRESSUREPAD;
++				} else {
++					goto out;
++				}
++			}
+ 			prop = (unsigned int)val;
+ 		}
+ 		props[idx].prop = prop;
