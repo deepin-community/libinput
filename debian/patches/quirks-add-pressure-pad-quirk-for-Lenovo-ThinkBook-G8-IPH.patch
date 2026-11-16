@@ -1,0 +1,61 @@
+From: lichenggang <lichenggang@uniontech.com>
+Date: Mon, 16 Nov 2026 10:30:00 +0800
+Subject: quirks: add ModelPressurePad quirk for Lenovo ThinkBook 14/16 G8+ IPH
+
+The Goodix GXTP5100 touchpads on the Lenovo ThinkBook 14 G8+ IPH and
+ThinkBook 16 G8+ IPH report pressure as contact size. Without a pressure
+pad quirk libinput can only click but cannot move the pointer.
+
+Add a ModelPressurePad quirk for these two exact models.
+
+The previously reverted patch (PR #8) added
+AttrInputProp=+INPUT_PROP_PRESSUREPAD. That property name is not known to
+libevdev < 1.13.6, so parse_input_prop_property() fails and the failure
+propagates up through parse_file()/parse_files(): libinput then gives up
+on the *entire* quirks database ("Failed to load the device quirks ...
+This will negatively affect device behavior"). Every model that relies
+on a quirk - e.g. the HONOR MagicBook Art 14 or the ThinkBook 14+ G6/G7
+pressure pads - loses its quirk, which is why touchpads stopped working
+on some machines.
+
+This version uses ModelPressurePad=1, which is supported by libinput
+1.28.1 and does not rely on libevdev knowing the property name. The
+match is also scoped to the exact DMI modalias and the GXTP5100 device
+name instead of the shared Goodix USB IDs (27C6:01E7/27C6:01E8), so
+other Lenovo models cannot be affected.
+
+Ref: https://gitlab.freedesktop.org/libinput/libinput/-/merge_requests/1442
+Forwarded: https://gitlab.freedesktop.org/libinput/libinput/-/merge_requests/1442
+Signed-off-by: lichenggang <lichenggang@uniontech.com>
+---
+ quirks/50-system-lenovo.quirks | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/quirks/50-system-lenovo.quirks b/quirks/50-system-lenovo.quirks
+index 73b4167..4954881 100644
+--- a/quirks/50-system-lenovo.quirks
++++ b/quirks/50-system-lenovo.quirks
+@@ -417,3 +417,23 @@ MatchName=*GXTP5100*
+ MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook14G7+IAH*:*
+ MatchUdevType=touchpad
+ ModelPressurePad=1
++
++# The Goodix GXTP5100 touchpads on the ThinkBook 14/16 G8+ IPH report
++# pressure as contact size, so libinput can only click but cannot move
++# the pointer. Mark these exact models as pressure pads.
++#
++# Match on the DMI modalias and the device name instead of the Goodix
++# USB IDs (27C6:01E7/27C6:01E8): those IDs are shared with touchpads on
++# other Lenovo models that are not pressure pads and must not get this
++# quirk.
++[Lenovo ThinkBook 14 G8+ IPH touchpad]
++MatchName=*GXTP5100*
++MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook14G8+IPH*:*
++MatchUdevType=touchpad
++ModelPressurePad=1
++
++[Lenovo ThinkBook 16 G8+ IPH touchpad]
++MatchName=*GXTP5100*
++MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook16G8+IPH*:*
++MatchUdevType=touchpad
++ModelPressurePad=1
