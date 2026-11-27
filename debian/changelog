@@ -6,8 +6,12 @@ libinput (1.28.1-1+deb13u1deepin3) unstable; urgency=medium
     in the quirks parser and the pressurepad detection.
   * Import upstream touchpad quirk entries for newer Goodix, Elan, Pixart,
     Synaptics, Dell and other models.
+  * Extend the ThinkBook G7+/G6+ pressure pad quirks to the 16-inch
+    models: the 16-inch ThinkBook G7+ IAH touchpad could only click but
+    not move the pointer because the DMI match was limited to
+    pvrThinkBook14G7+IAH.
 
- -- lichenggang <lichenggang@uniontech.com>  Mon, 16 Nov 2026 22:08:49 +0800
+ -- lichenggang <lichenggang@uniontech.com>  Fri, 27 Nov 2026 18:02:11 +0800
 
 libinput (1.28.1-1+deb13u1deepin2) unstable; urgency=medium
 
