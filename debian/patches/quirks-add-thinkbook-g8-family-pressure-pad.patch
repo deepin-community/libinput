@@ -1,0 +1,50 @@
+From: lichenggang <lichenggang@uniontech.com>
+Date: Fri, 27 Nov 2026 19:10:00 +0800
+Subject: quirks: match the ThinkBook G8+ pressure pads by family
+
+The ThinkBook G8+ touchpads are Goodix GXTP5100 pressure pads that
+report pressure as contact size. Without a pressure pad quirk libinput
+treats every touch as a huge contact and discards it, so the touchpad
+can click but not move the pointer.
+
+The existing entries spell out the platform suffix
+(pvrThinkBook14G8+IPH / pvrThinkBook16G8+IPH), which leaves the other
+members of the family - e.g. the ThinkBook 16 G8+ AGP reported upstream
+in issue 1323 - with a dead touchpad.
+
+Match the whole G8+ family instead, still requiring the GXTP5100 device
+name so that only the haptic pad is affected. The non-plus G8 models
+(pvrThinkBook14G8IRL and friends), the G7+ series, the ThinkPad X9 and
+other vendors do not match either the product glob or the device name.
+
+Kept the two existing per-model entries: they are now redundant but
+harmless, and removing them would make this patch conflict with the
+already merged one for no benefit.
+
+Ref: https://gitlab.freedesktop.org/libinput/libinput/-/issues/1323
+Forwarded: not-needed (downstream quirk, upstream covers this by USB ID)
+Signed-off-by: lichenggang <lichenggang@uniontech.com>
+---
+ quirks/50-system-lenovo.quirks | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/quirks/50-system-lenovo.quirks b/quirks/50-system-lenovo.quirks
+@@ -437,3 +437,18 @@
+ MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook16G8+IPH*:*
+ MatchUdevType=touchpad
+ ModelPressurePad=1
++
++# The ThinkBook G8+ family ships the same Goodix GXTP5100 pressure pad
++# under several platform suffixes (IPH, AGP, ...). Matching the suffix
++# one by one leaves the other variants with a touchpad that can click
++# but not move, see
++# https://gitlab.freedesktop.org/libinput/libinput/-/issues/1323 for a
++# ThinkBook 16 G8+ AGP.
++#
++# Match the family instead, still requiring the GXTP5100 device name so
++# only the haptic pad is affected.
++[Lenovo ThinkBook G8+ touchpad]
++MatchName=*GXTP5100*
++MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook*G8+*:*
++MatchUdevType=touchpad
++ModelPressurePad=1

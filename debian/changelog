@@ -1,3 +1,12 @@
+libinput (1.28.1-1+deb13u1deepin3) unstable; urgency=medium
+
+  * Match the ThinkBook G8+ pressure pads by family instead of platform
+    suffix
+  * The ThinkBook 16 G8+ AGP touchpad could click but not move because
+    the quirk only listed the IPH variants
+
+ -- lichenggang <lichenggang@uniontech.com>  Fri, 27 Nov 2026 18:43:04 +0800
+
 libinput (1.28.1-1+deb13u1deepin2) unstable; urgency=medium
 
   * Add a DMI-scoped ModelPressurePad quirk for the Lenovo ThinkBook
