@@ -1,0 +1,121 @@
+From: lichenggang <lichenggang@uniontech.com>
+Date: Fri, 27 Nov 2026 18:50:00 +0800
+Subject: touchpad: support the AttrTouchpadHysteresis quirk
+
+The Framework Laptop 13 Pro haptic touchpad reports jitter that the
+hysteresis logic misinterprets, so upstream marks it with
+AttrTouchpadHysteresis=0 to switch hysteresis off for that device.
+
+Backport the quirk key. This version keeps hysteresis as a plain bool
+(tp->hysteresis.enabled), so honouring the quirk only needs to override
+that flag; the behaviour of every other touchpad is unchanged because
+the previous heuristic is kept as the fallback.
+
+The state-machine rework that upstream did around the same time
+(HYSTERESIS_STATE_INACTIVE/ACTIVE/DISABLED) is deliberately not
+backported - it exists to re-enable hysteresis after jitter detection,
+which none of the quirks here require.
+
+Ref: https://gitlab.freedesktop.org/libinput/libinput/-/commit/1cf63c30
+Forwarded: not-needed (partial backport from upstream main)
+Signed-off-by: lichenggang <lichenggang@uniontech.com>
+---
+ quirks/50-system-framework.quirks |  8 ++++++++
+ src/evdev-mt-touchpad.c           | 24 +++++++++++++++++++-----
+ src/quirks.c                      |  8 ++++++++
+ src/quirks.h                      |  1 +
+ 4 files changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/src/quirks.h b/src/quirks.h
+--- a/src/quirks.h
++++ b/src/quirks.h
+@@ -109,6 +109,7 @@
+ 	QUIRK_ATTR_MSC_TIMESTAMP,
+ 	QUIRK_ATTR_EVENT_CODE,
+ 	QUIRK_ATTR_INPUT_PROP,
++	QUIRK_ATTR_TOUCHPAD_HYSTERESIS,
+ 
+ 	_QUIRK_LAST_ATTR_QUIRK_, /* Guard: do not modify */
+ };
+diff --git a/src/quirks.c b/src/quirks.c
+--- a/src/quirks.c
++++ b/src/quirks.c
+@@ -292,6 +292,7 @@
+ 	case QUIRK_ATTR_MSC_TIMESTAMP:			return "AttrMscTimestamp";
+ 	case QUIRK_ATTR_EVENT_CODE:			return "AttrEventCode";
+ 	case QUIRK_ATTR_INPUT_PROP:			return "AttrInputProp";
++	case QUIRK_ATTR_TOUCHPAD_HYSTERESIS:		return "AttrTouchpadHysteresis";
+ 	default:
+ 		abort();
+ 	}
+@@ -879,6 +880,13 @@
+ 		p->type = PT_TUPLES;
+ 
+ 		rc = true;
++	} else if (streq(key, quirk_get_name(QUIRK_ATTR_TOUCHPAD_HYSTERESIS))) {
++		p->id = QUIRK_ATTR_TOUCHPAD_HYSTERESIS;
++		if (!parse_boolean_property(value, &b))
++			goto out;
++		p->type = PT_BOOL;
++		p->value.b = b;
++		rc = true;
+ 	} else {
+ 		qlog_error(ctx, "Unknown key %s in %s\n", key, s->name);
+ 	}
+diff --git a/src/evdev-mt-touchpad.c b/src/evdev-mt-touchpad.c
+--- a/src/evdev-mt-touchpad.c
++++ b/src/evdev-mt-touchpad.c
+@@ -3587,6 +3587,9 @@
+ 	int xmargin, ymargin;
+ 	const struct input_absinfo *ax = tp->device->abs.absinfo_x,
+ 				   *ay = tp->device->abs.absinfo_y;
++	struct quirks_context *quirks;
++	struct quirks *q;
++	bool use_hysteresis;
+ 
+ 	if (ax->fuzz)
+ 		xmargin = ax->fuzz;
+@@ -3600,12 +3603,27 @@
+ 
+ 	tp->hysteresis.margin.x = xmargin;
+ 	tp->hysteresis.margin.y = ymargin;
+-	tp->hysteresis.enabled = (ax->fuzz || ay->fuzz);
++
++	quirks = evdev_libinput_context(tp->device)->quirks;
++	q = quirks_fetch_for_device(quirks, tp->device->udev_device);
++	if (q && quirks_get_bool(q, QUIRK_ATTR_TOUCHPAD_HYSTERESIS,
++				 &use_hysteresis)) {
++		tp->hysteresis.enabled = use_hysteresis;
++		if (!use_hysteresis)
++			evdev_log_debug(tp->device,
++					"hysteresis disabled by quirk\n");
++	} else {
++		tp->hysteresis.enabled = (ax->fuzz || ay->fuzz);
++	}
++
+ 	if (tp->hysteresis.enabled)
+ 		evdev_log_debug(tp->device,
+ 				"hysteresis enabled. "
+ 				"See %s/touchpad-jitter.html for details\n",
+ 				HTTP_DOC_LINK);
++
++	if (q)
++		quirks_unref(q);
+ }
+ 
+ static void
+diff --git a/quirks/50-system-framework.quirks b/quirks/50-system-framework.quirks
+--- a/quirks/50-system-framework.quirks
++++ b/quirks/50-system-framework.quirks
+@@ -9,3 +9,11 @@
+ MatchUdevType=keyboard
+ MatchDMIModalias=dmi:*svnFramework:pnLaptop16*
+ AttrKeyboardIntegration=internal
++
++[Framework Laptop 13 Pro Haptic Touchpad]
++MatchBus=i2c
++MatchUdevType=touchpad
++MatchVendor=0x093A
++MatchProduct=0x1343
++MatchDMIModalias=dmi:*:svnFramework:pnLaptop13Pro*:*
++AttrTouchpadHysteresis=0
