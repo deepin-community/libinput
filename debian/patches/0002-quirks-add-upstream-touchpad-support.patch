@@ -430,11 +430,11 @@ index 7e4ef99..6348d06 100644
 +AttrThumbPressureThreshold=80
 +AttrPalmPressureThreshold=125
 diff --git a/quirks/50-system-lenovo.quirks b/quirks/50-system-lenovo.quirks
-index 73b4167..d2bbaf3 100644
+index 4954881..c7826f8 100644
 --- a/quirks/50-system-lenovo.quirks
 +++ b/quirks/50-system-lenovo.quirks
-@@ -417,3 +417,12 @@ MatchName=*GXTP5100*
- MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook14G7+IAH*:*
+@@ -437,3 +437,12 @@ MatchName=*GXTP5100*
+ MatchDMIModalias=dmi:*svnLENOVO:*pvrThinkBook16G8+IPH*:*
  MatchUdevType=touchpad
  ModelPressurePad=1
 +
