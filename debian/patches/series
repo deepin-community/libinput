@@ -4,3 +4,4 @@ util-don-t-call-function-in-macro-argument.patch
 util-sanitize-control-characters-in-str_sanitize.patch
 libinput-device-group-sanitize-phys-before-printing-.patch
 quirks-add-pressure-pad-quirk-for-Lenovo-ThinkBook-G8-IPH.patch
+quirks-add-thinkbook-g8-family-pressure-pad.patch
