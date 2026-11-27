@@ -4,3 +4,8 @@ util-don-t-call-function-in-macro-argument.patch
 util-sanitize-control-characters-in-str_sanitize.patch
 libinput-device-group-sanitize-phys-before-printing-.patch
 quirks-add-pressure-pad-quirk-for-Lenovo-ThinkBook-G8-IPH.patch
+0001-touchpad-support-INPUT_PROP_PRESSUREPAD.patch
+0002-quirks-add-upstream-touchpad-support.patch
+0003-quirks-extend-ThinkBook-G7-G6-pressure-pad-to-16-inch.patch
+0004-quirks-add-remaining-upstream-devices.patch
+0005-touchpad-support-AttrTouchpadHysteresis.patch

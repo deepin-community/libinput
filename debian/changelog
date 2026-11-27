@@ -1,3 +1,23 @@
+libinput (1.28.1-1+deb13u1deepin3) unstable; urgency=medium
+
+  * Backport upstream INPUT_PROP_PRESSUREPAD support for haptic/pressure
+    touchpads.
+  * Add the missing header definition, the libevdev < 1.13.6 name fallback
+    in the quirks parser and the pressurepad detection.
+  * Import upstream touchpad quirk entries for newer Goodix, Elan, Pixart,
+    Synaptics, Dell and other models.
+  * Extend the ThinkBook G7+/G6+ pressure pad quirks to the 16-inch
+    models: the 16-inch ThinkBook G7+ IAH touchpad could only click but
+    not move the pointer because the DMI match was limited to
+    pvrThinkBook14G7+IAH.
+  * Add the remaining upstream device entries this baseline did not
+    match: GPD Pocket 3 Stylus, Nulea M501 Bluetooth trackball and the
+    Contour RollerMouse USB receiver.
+  * Support the AttrTouchpadHysteresis quirk, needed by the Framework
+    Laptop 13 Pro haptic touchpad.
+
+ -- lichenggang <lichenggang@uniontech.com>  Fri, 27 Nov 2026 18:02:11 +0800
+
 libinput (1.28.1-1+deb13u1deepin2) unstable; urgency=medium
 
   * Add a DMI-scoped ModelPressurePad quirk for the Lenovo ThinkBook
